@@ -37,6 +37,7 @@
 #import "vphoned_notify.h"
 #import "vphoned_protocol.h"
 #import "vphoned_settings.h"
+#import "vphoned_service_state.h"
 #import "vphoned_url.h"
 #import "vphoned_vcam.h"
 
@@ -53,16 +54,10 @@
 
 static const NSTimeInterval VPOptionalServiceStartupTimeoutSeconds = 5.0;
 
-enum VPServiceState {
-  VPServiceStatePending = 0,
-  VPServiceStateAvailable = 1,
-  VPServiceStateUnavailable = 2,
-};
-
-static atomic_int gHIDAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
-static atomic_int gTouchAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
-static atomic_int gClipboardAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
-static atomic_int gAppsAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
+static VPServiceState gHIDAvailable = VP_SERVICE_STATE_INITIALIZER;
+static VPServiceState gTouchAvailable = VP_SERVICE_STATE_INITIALIZER;
+static VPServiceState gClipboardAvailable = VP_SERVICE_STATE_INITIALIZER;
+static VPServiceState gAppsAvailable = VP_SERVICE_STATE_INITIALIZER;
 
 #define INSTALL_PATH "/usr/bin/vphoned"
 #define CACHE_PATH "/var/root/Library/Caches/vphoned"
@@ -75,27 +70,6 @@ struct sockaddr_vm {
   __uint32_t svm_port;
   __uint32_t svm_cid;
 };
-
-static BOOL vp_service_available(atomic_int *state) {
-  return atomic_load_explicit(state, memory_order_acquire) ==
-         VPServiceStateAvailable;
-}
-
-static BOOL vp_service_complete(atomic_int *state, BOOL available) {
-  int expected = VPServiceStatePending;
-  int desired = available ? VPServiceStateAvailable : VPServiceStateUnavailable;
-  return atomic_compare_exchange_strong_explicit(
-      state, &expected, desired, memory_order_release, memory_order_relaxed);
-}
-
-static void vp_service_expire(atomic_int *state, NSString *service) {
-  int expected = VPServiceStatePending;
-  if (atomic_compare_exchange_strong_explicit(
-          state, &expected, VPServiceStateUnavailable, memory_order_release,
-          memory_order_relaxed)) {
-    NSLog(@"vphoned: optional service %@ timed out", service);
-  }
-}
 
 static NSMutableDictionary *vp_service_unavailable_response(NSString *service,
                                                             id reqId) {
@@ -607,10 +581,14 @@ int main(int argc, char *argv[]) {
                                 NSEC_PER_SEC)));
     if (startupWait != 0)
       NSLog(@"vphoned: optional service startup deadline reached");
-    vp_service_expire(&gHIDAvailable, @"hid");
-    vp_service_expire(&gTouchAvailable, @"touch");
-    vp_service_expire(&gClipboardAvailable, @"clipboard");
-    vp_service_expire(&gAppsAvailable, @"apps");
+    if (vp_service_expire(&gHIDAvailable))
+      NSLog(@"vphoned: optional service hid timed out");
+    if (vp_service_expire(&gTouchAvailable))
+      NSLog(@"vphoned: optional service touch timed out");
+    if (vp_service_expire(&gClipboardAvailable))
+      NSLog(@"vphoned: optional service clipboard timed out");
+    if (vp_service_expire(&gAppsAvailable))
+      NSLog(@"vphoned: optional service apps timed out");
 
     vp_vcam_start();
 
