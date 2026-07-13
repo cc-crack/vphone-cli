@@ -16,16 +16,18 @@ private final class ScreenshotCallbackBox: @unchecked Sendable {
         self.completion = completion
     }
 
-    func resumeOnce(_ image: CGImage?) {
+    @discardableResult
+    func resumeOnce(_ image: CGImage?) -> Bool {
         lock.lock()
         guard !didResume else {
             lock.unlock()
-            return
+            return false
         }
         didResume = true
         lock.unlock()
 
         completion(image)
+        return true
     }
 }
 
@@ -192,8 +194,10 @@ class VPhoneScreenRecorder {
         let description: String
     }
 
-    private typealias ScreenshotCompletionBlock = @convention(block) (AnyObject?) -> Void
+    private typealias ScreenshotCompletionBlock =
+        @convention(block) (AnyObject?, AnyObject?) -> Void
     private typealias ScreenshotIMP = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+    private static let ScreenshotTimeoutSeconds = 2.0
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -380,8 +384,23 @@ class VPhoneScreenRecorder {
         if let cgImage = await takeGraphicsScreenshot(from: source.graphicsDisplay) {
             return cgImage
         }
-
         throw CaptureError.captureFailed
+    }
+
+    private nonisolated static func validateNativeFrame(
+        _ cgImage: CGImage,
+        expectedWidth: Int,
+        expectedHeight: Int,
+        source: String
+    ) -> CGImage? {
+        guard cgImage.width == expectedWidth, cgImage.height == expectedHeight else {
+            print(
+                "[record] rejected \(source) dimensions width=\(cgImage.width) "
+                    + "height=\(cgImage.height) expected=\(expectedWidth)x\(expectedHeight)"
+            )
+            return nil
+        }
+        return cgImage
     }
 
     private func appendFrame(from adaptor: AVAssetWriterInputPixelBufferAdaptor, cgImage: CGImage) {
@@ -450,9 +469,44 @@ class VPhoneScreenRecorder {
         let implementation = method_getImplementation(method)
         let function = unsafeBitCast(implementation, to: ScreenshotIMP.self)
         let converter = screenshotObjectConverter
+        let expectedSize = graphicsDisplay.sizeInPixels
+        let expectedWidth = Int(expectedSize.width.rounded())
+        let expectedHeight = Int(expectedSize.height.rounded())
+        let screenshotTimeoutSeconds = Self.ScreenshotTimeoutSeconds
 
-        let block: ScreenshotCompletionBlock = { imageObject in
-            callbackBox.resumeOnce(converter.convert(imageObject))
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + screenshotTimeoutSeconds
+        ) {
+            if callbackBox.resumeOnce(nil) {
+                print(
+                    "[record] screenshot callback timed out after "
+                        + "\(screenshotTimeoutSeconds)s"
+                )
+            }
+        }
+
+        let block: ScreenshotCompletionBlock = { imageObject, errorObject in
+            if let error = errorObject as? NSError {
+                print(
+                    "[record] screenshot callback error: domain=\(error.domain) "
+                        + "code=\(error.code) description=\(error.localizedDescription)"
+                )
+            }
+
+            guard let cgImage = converter.convert(imageObject) else {
+                callbackBox.resumeOnce(nil)
+                return
+            }
+            guard let nativeFrame = Self.validateNativeFrame(
+                cgImage,
+                expectedWidth: expectedWidth,
+                expectedHeight: expectedHeight,
+                source: "screenshot"
+            ) else {
+                callbackBox.resumeOnce(nil)
+                return
+            }
+            callbackBox.resumeOnce(nativeFrame)
         }
         let blockObject = unsafeBitCast(block, to: AnyObject.self)
         function(graphicsDisplay, selector, blockObject)

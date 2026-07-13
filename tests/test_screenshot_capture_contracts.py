@@ -96,6 +96,42 @@ class ScreenshotCaptureContracts(unittest.TestCase):
             "the async capture wrapper must use the same exactly-once completion guard",
         )
 
+    def test_private_callback_has_error_abi_and_a_hard_deadline(self):
+        self.assertRegex(
+            self.source,
+            r"ScreenshotCompletionBlock\s*=\s*@convention\(block\)\s*\(AnyObject\?,\s*AnyObject\?\)",
+            "Virtualization supplies both image and error callback arguments",
+        )
+        self.assertRegex(
+            self.source,
+            r"ScreenshotTimeoutSeconds\s*=\s*2(?:\.0+)?",
+            "each private capture attempt must have a two-second deadline",
+        )
+        self.assertRegex(
+            self.source,
+            r"screenshotTimeoutSeconds\s*=\s*Self\.ScreenshotTimeoutSeconds"
+            r"[\s\S]{0,300}?asyncAfter\([\s\S]{0,300}?resumeOnce\(nil\)",
+            "the deadline must race the callback through the exactly-once box",
+        )
+
+    def test_still_capture_rejects_wrong_dimensions(self):
+        self.assertRegex(
+            self.source,
+            r"graphicsDisplay\.sizeInPixels",
+            "capture validation must derive dimensions from the active display",
+        )
+        self.assertRegex(
+            self.source,
+            r"cgImage\.width\s*==\s*expectedWidth[\s\S]{0,120}?cgImage\.height\s*==\s*expectedHeight",
+            "only native display dimensions may be accepted",
+        )
+
+    def test_capture_does_not_read_private_framebuffer_memory(self):
+        self.assertNotIn("_framebufferView", self.source)
+        self.assertNotIn("_lastNonEmptyFrameUpdate", self.source)
+        self.assertNotIn("sharedFrameUpdateStorage", self.source)
+        self.assertNotIn("Unmanaged<AnyObject>.fromOpaque", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
