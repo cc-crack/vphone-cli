@@ -27,6 +27,7 @@ class VPhoneHostControl {
     private let socketPath: String
     private var listenFD: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "vphone.hostcontrol.accept")
+    private let clientQueue = DispatchQueue(label: "vphone.hostcontrol.client", attributes: .concurrent)
 
     private weak var captureView: VPhoneVirtualMachineView?
     private var screenRecorder: VPhoneScreenRecorder?
@@ -111,8 +112,9 @@ class VPhoneHostControl {
         print("[hostctl] listening on \(socketPath)")
 
         let capturedFD = fd
+        let clientQueue = clientQueue
         acceptQueue.async { [weak self] in
-            Self.acceptLoop(listenFD: capturedFD, controller: self)
+            Self.acceptLoop(listenFD: capturedFD, controller: self, clientQueue: clientQueue)
         }
     }
 
@@ -176,11 +178,13 @@ class VPhoneHostControl {
 
     // MARK: - Accept Loop
 
-    private nonisolated static func acceptLoop(listenFD: Int32, controller: VPhoneHostControl?) {
+    private nonisolated static func acceptLoop(
+        listenFD: Int32, controller: VPhoneHostControl?, clientQueue: DispatchQueue
+    ) {
         while true {
             let clientFD = accept(listenFD, nil, nil)
             guard clientFD >= 0 else { break }
-            handleClient(clientFD, controller: controller)
+            clientQueue.async { handleClient(clientFD, controller: controller) }
         }
     }
 
