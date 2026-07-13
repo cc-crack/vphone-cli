@@ -69,6 +69,11 @@ BOOL vp_hid_load(void) {
     return YES;
 }
 
+BOOL vp_hid_touch_available(void) {
+    return gClient != NULL && pDigitizer != NULL && pFinger != NULL &&
+           pAppend != NULL && pSetInt != NULL;
+}
+
 static void send_hid_event(IOHIDEventRef event) {
     IOHIDEventRef strong = (IOHIDEventRef)CFRetain(event);
     dispatch_async(gHIDQueue, ^{

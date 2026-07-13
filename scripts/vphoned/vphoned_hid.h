@@ -11,6 +11,9 @@
 /// Load IOKit symbols and create HID event client. Returns NO on failure.
 BOOL vp_hid_load(void);
 
+/// Returns YES when digitizer symbols required for guest touch injection loaded.
+BOOL vp_hid_touch_available(void);
+
 /// Send a full key press (down + 100ms delay + up).
 void vp_hid_press(uint32_t page, uint32_t usage);
 

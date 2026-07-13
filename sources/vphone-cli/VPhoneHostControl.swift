@@ -184,6 +184,15 @@ class VPhoneHostControl {
         while true {
             let clientFD = accept(listenFD, nil, nil)
             guard clientFD >= 0 else { break }
+            var noSigPipe: Int32 = 1
+            guard setsockopt(
+                clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                socklen_t(MemoryLayout.size(ofValue: noSigPipe))
+            ) == 0 else {
+                print("[hostctl] SO_NOSIGPIPE failed: \(String(cString: strerror(errno)))")
+                close(clientFD)
+                continue
+            }
             clientQueue.async { handleClient(clientFD, controller: controller) }
         }
     }

@@ -89,6 +89,26 @@ class HostControlConcurrencyContracts(unittest.TestCase):
             "acceptLoop must not process clients inline on the accept queue",
         )
 
+    def test_accepted_clients_cannot_terminate_host_with_sigpipe(self):
+        option = re.search(
+            r"setsockopt\(\s*clientFD,\s*SOL_SOCKET,\s*SO_NOSIGPIPE",
+            self.source,
+        )
+        dispatch = re.search(
+            r"clientQueue\.async\s*\{\s*handleClient\(clientFD",
+            self.source,
+        )
+        self.assertIsNotNone(
+            option,
+            "each accepted socket must suppress SIGPIPE before delayed writes",
+        )
+        self.assertIsNotNone(dispatch, "accepted sockets must be dispatched independently")
+        self.assertLess(
+            option.start(),
+            dispatch.start(),
+            "SO_NOSIGPIPE must be applied before client work is dispatched",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

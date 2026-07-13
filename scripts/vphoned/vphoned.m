@@ -51,9 +51,18 @@
 #define VPHONED_BUILD_HASH "unknown"
 #endif
 
-static atomic_bool gHIDAvailable = ATOMIC_VAR_INIT(false);
-static atomic_bool gClipboardAvailable = ATOMIC_VAR_INIT(false);
-static atomic_bool gAppsAvailable = ATOMIC_VAR_INIT(false);
+static const NSTimeInterval VPOptionalServiceStartupTimeoutSeconds = 5.0;
+
+enum VPServiceState {
+  VPServiceStatePending = 0,
+  VPServiceStateAvailable = 1,
+  VPServiceStateUnavailable = 2,
+};
+
+static atomic_int gHIDAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
+static atomic_int gTouchAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
+static atomic_int gClipboardAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
+static atomic_int gAppsAvailable = ATOMIC_VAR_INIT(VPServiceStatePending);
 
 #define INSTALL_PATH "/usr/bin/vphoned"
 #define CACHE_PATH "/var/root/Library/Caches/vphoned"
@@ -67,12 +76,25 @@ struct sockaddr_vm {
   __uint32_t svm_cid;
 };
 
-static BOOL vp_service_available(atomic_bool *flag) {
-  return atomic_load_explicit(flag, memory_order_acquire);
+static BOOL vp_service_available(atomic_int *state) {
+  return atomic_load_explicit(state, memory_order_acquire) ==
+         VPServiceStateAvailable;
 }
 
-static void vp_service_mark_available(atomic_bool *flag) {
-  atomic_store_explicit(flag, true, memory_order_release);
+static BOOL vp_service_complete(atomic_int *state, BOOL available) {
+  int expected = VPServiceStatePending;
+  int desired = available ? VPServiceStateAvailable : VPServiceStateUnavailable;
+  return atomic_compare_exchange_strong_explicit(
+      state, &expected, desired, memory_order_release, memory_order_relaxed);
+}
+
+static void vp_service_expire(atomic_int *state, NSString *service) {
+  int expected = VPServiceStatePending;
+  if (atomic_compare_exchange_strong_explicit(
+          state, &expected, VPServiceStateUnavailable, memory_order_release,
+          memory_order_relaxed)) {
+    NSLog(@"vphoned: optional service %@ timed out", service);
+  }
 }
 
 static NSMutableDictionary *vp_service_unavailable_response(NSString *service,
@@ -221,7 +243,7 @@ static NSDictionary *handle_command(NSDictionary *msg) {
   }
 
   if ([type isEqualToString:@"touch"]) {
-    if (!vp_service_available(&gHIDAvailable))
+    if (!vp_service_available(&gTouchAvailable))
       return vp_service_unavailable_response(@"touch", reqId);
     int phase = [msg[@"phase"] intValue];
     double x = [msg[@"x"] doubleValue];
@@ -362,7 +384,7 @@ static BOOL handle_client(int fd) {
       [caps addObject:@"apps"];
     [caps addObject:@"url"];
     [caps addObject:@"settings"];
-    if (vp_service_available(&gHIDAvailable))
+    if (vp_service_available(&gTouchAvailable))
       [caps addObject:@"touch"];
 
     NSMutableDictionary *helloResp = [@{
@@ -431,7 +453,10 @@ static BOOL handle_client(int fd) {
 
         // Clipboard operations (need fd for inline binary transfer)
         if ([t hasPrefix:@"clipboard_"]) {
-          NSDictionary *resp = vp_handle_clipboard_command(fd, msg);
+          NSDictionary *resp =
+              vp_service_available(&gClipboardAvailable)
+                  ? vp_handle_clipboard_command(fd, msg)
+                  : vp_service_unavailable_response(@"clipboard", msg[@"id"]);
           if (resp && !vp_write_message(fd, resp))
             break;
           continue;
@@ -439,7 +464,10 @@ static BOOL handle_client(int fd) {
 
         // App management operations
         if ([t hasPrefix:@"app_"]) {
-          NSDictionary *resp = vp_handle_apps_command(msg);
+          NSDictionary *resp =
+              vp_service_available(&gAppsAvailable)
+                  ? vp_handle_apps_command(msg)
+                  : vp_service_unavailable_response(@"apps", msg[@"id"]);
           if (resp && !vp_write_message(fd, resp))
             break;
           continue;
@@ -519,40 +547,71 @@ int main(int argc, char *argv[]) {
     dispatch_queue_t optionalServiceQueue =
         dispatch_queue_create("com.vphone.vphoned.optional-services",
                               optionalServiceAttr);
+    dispatch_group_t optionalServiceGroup = dispatch_group_create();
 
+    dispatch_group_enter(optionalServiceGroup);
     dispatch_async(optionalServiceQueue, ^{
       @autoreleasepool {
         NSLog(@"vphoned: optional service hid start");
-        if (vp_hid_load()) {
-          vp_service_mark_available(&gHIDAvailable);
+        BOOL loaded = vp_hid_load();
+        BOOL touchReady = loaded && vp_hid_touch_available();
+        BOOL hidPublished = vp_service_complete(&gHIDAvailable, loaded);
+        BOOL touchPublished = vp_service_complete(&gTouchAvailable, touchReady);
+        if (!hidPublished || !touchPublished) {
+          NSLog(@"vphoned: optional service hid completed after startup deadline; ignored");
+        } else if (loaded) {
           NSLog(@"vphoned: optional service hid ready");
+          NSLog(@"vphoned: optional service touch %@",
+                touchReady ? @"ready" : @"unavailable");
         } else {
           NSLog(@"vphoned: optional service hid unavailable");
         }
       }
+      dispatch_group_leave(optionalServiceGroup);
     });
+    dispatch_group_enter(optionalServiceGroup);
     dispatch_async(optionalServiceQueue, ^{
       @autoreleasepool {
         NSLog(@"vphoned: optional service clipboard start");
-        if (vp_clipboard_load()) {
-          vp_service_mark_available(&gClipboardAvailable);
+        BOOL loaded = vp_clipboard_load();
+        if (!vp_service_complete(&gClipboardAvailable, loaded)) {
+          NSLog(@"vphoned: optional service clipboard completed after startup deadline; ignored");
+        } else if (loaded) {
           NSLog(@"vphoned: optional service clipboard ready");
         } else {
           NSLog(@"vphoned: optional service clipboard unavailable");
         }
       }
+      dispatch_group_leave(optionalServiceGroup);
     });
+    dispatch_group_enter(optionalServiceGroup);
     dispatch_async(optionalServiceQueue, ^{
       @autoreleasepool {
         NSLog(@"vphoned: optional service apps start");
-        if (vp_apps_load()) {
-          vp_service_mark_available(&gAppsAvailable);
+        BOOL loaded = vp_apps_load();
+        if (!vp_service_complete(&gAppsAvailable, loaded)) {
+          NSLog(@"vphoned: optional service apps completed after startup deadline; ignored");
+        } else if (loaded) {
           NSLog(@"vphoned: optional service apps ready");
         } else {
           NSLog(@"vphoned: optional service apps unavailable");
         }
       }
+      dispatch_group_leave(optionalServiceGroup);
     });
+
+    long startupWait = dispatch_group_wait(
+        optionalServiceGroup,
+        dispatch_time(DISPATCH_TIME_NOW,
+                      (int64_t)(VPOptionalServiceStartupTimeoutSeconds *
+                                NSEC_PER_SEC)));
+    if (startupWait != 0)
+      NSLog(@"vphoned: optional service startup deadline reached");
+    vp_service_expire(&gHIDAvailable, @"hid");
+    vp_service_expire(&gTouchAvailable, @"touch");
+    vp_service_expire(&gClipboardAvailable, @"clipboard");
+    vp_service_expire(&gAppsAvailable, @"apps");
+
     vp_vcam_start();
 
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
