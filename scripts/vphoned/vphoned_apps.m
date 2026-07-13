@@ -31,6 +31,9 @@
 
 // FBSSystemService loaded via dlsym
 static Class gFBSSystemServiceClass = Nil;
+typedef CFStringRef (*SBSCopyFrontmostApplicationDisplayIdentifierFn)(void);
+static SBSCopyFrontmostApplicationDisplayIdentifierFn
+    pSBSCopyFrontmostApplicationDisplayIdentifier = NULL;
 
 static BOOL gAppsLoaded = NO;
 
@@ -46,6 +49,18 @@ BOOL vp_apps_load(void) {
     }
   } else {
     NSLog(@"vphoned: dlopen FrontBoardServices failed: %s", dlerror());
+  }
+
+  void *sbs = dlopen("/System/Library/PrivateFrameworks/"
+                     "SpringBoardServices.framework/SpringBoardServices",
+                     RTLD_LAZY);
+  if (sbs) {
+    pSBSCopyFrontmostApplicationDisplayIdentifier =
+        (SBSCopyFrontmostApplicationDisplayIdentifierFn)dlsym(
+            sbs, "SBSCopyFrontmostApplicationDisplayIdentifier");
+  }
+  if (!pSBSCopyFrontmostApplicationDisplayIdentifier) {
+    NSLog(@"vphoned: frontmost application API unavailable");
   }
 
   // LSApplicationWorkspace is in CoreServices (already linked)
@@ -127,6 +142,40 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
 
     NSMutableDictionary *r = vp_make_response(@"app_list", reqId);
     r[@"apps"] = result;
+    return r;
+  }
+
+  // -- app_foreground --
+  if ([type isEqualToString:@"app_foreground"]) {
+    if (!pSBSCopyFrontmostApplicationDisplayIdentifier) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"msg"] = @"foreground application API unavailable";
+      return r;
+    }
+
+    CFStringRef copiedIdentifier =
+        pSBSCopyFrontmostApplicationDisplayIdentifier();
+    NSString *bundleID = CFBridgingRelease(copiedIdentifier);
+    if (bundleID.length == 0) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"msg"] = @"no foreground application";
+      return r;
+    }
+
+    NSString *name = @"";
+    LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+    for (LSApplicationProxy *proxy in [ws allInstalledApplications]) {
+      if ([proxy.bundleIdentifier isEqualToString:bundleID]) {
+        name = proxy.localizedName ?: @"";
+        break;
+      }
+    }
+
+    pid_t pid = pid_for_app(bundleID);
+    NSMutableDictionary *r = vp_make_response(@"app_foreground", reqId);
+    r[@"bundle_id"] = bundleID;
+    r[@"name"] = name;
+    r[@"pid"] = @(pid > 0 ? pid : 0);
     return r;
   }
 

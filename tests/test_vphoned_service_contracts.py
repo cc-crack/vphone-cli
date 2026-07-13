@@ -6,6 +6,7 @@ from pathlib import Path
 VPHONED_SOURCE = (
     Path(__file__).resolve().parents[1] / "scripts" / "vphoned" / "vphoned.m"
 )
+APPS_SOURCE = VPHONED_SOURCE.parent / "vphoned_apps.m"
 
 
 class VphonedServiceContractsTests(unittest.TestCase):
@@ -95,6 +96,19 @@ class VphonedServiceContractsTests(unittest.TestCase):
         self.assertRegex(
             hid_impl,
             r"BOOL\s+vp_hid_touch_available\(void\)[\s\S]{0,250}?pDigitizer[\s\S]{0,250}?pFinger",
+        )
+
+    def test_foreground_app_uses_springboard_frontmost_identifier(self) -> None:
+        apps_source = APPS_SOURCE.read_text()
+        self.assertIn("SBSCopyFrontmostApplicationDisplayIdentifier", apps_source)
+        self.assertRegex(
+            apps_source,
+            r'dlsym\([^;]+"SBSCopyFrontmostApplicationDisplayIdentifier"\)',
+        )
+        self.assertRegex(
+            apps_source,
+            r'isEqualToString:@"app_foreground"[\s\S]{0,1800}?@"bundle_id"[\s\S]{0,500}?@"name"[\s\S]{0,500}?@"pid"',
+            "app_foreground must return the MCP contract fields",
         )
 
 
