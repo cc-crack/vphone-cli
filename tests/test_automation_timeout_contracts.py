@@ -71,6 +71,9 @@ class VphonedURLTimeoutContracts(unittest.TestCase):
 class HostControlConcurrencyContracts(unittest.TestCase):
     def setUp(self):
         self.source = read_source("sources/vphone-cli/VPhoneHostControl.swift")
+        self.reader_source = read_source(
+            "sources/vphone-cli/VPhoneHostRequestReader.swift"
+        )
 
     def test_accepted_clients_are_dispatched_independently(self):
         self.assertRegex(
@@ -80,7 +83,7 @@ class HostControlConcurrencyContracts(unittest.TestCase):
         )
         self.assertRegex(
             self.source,
-            r"clientQueue\.async\s*\{\s*handleClient\(clientFD,\s*controller:\s*controller\)",
+            r"clientQueue\.async\s*\{[\s\S]{0,160}?handleClient\(clientFD,\s*controller:\s*controller\)",
             "acceptLoop must hand each fd to an independent client task",
         )
         self.assertNotRegex(
@@ -95,7 +98,7 @@ class HostControlConcurrencyContracts(unittest.TestCase):
             self.source,
         )
         dispatch = re.search(
-            r"clientQueue\.async\s*\{\s*handleClient\(clientFD",
+            r"clientQueue\.async\s*\{[\s\S]{0,160}?handleClient\(clientFD",
             self.source,
         )
         self.assertIsNotNone(
@@ -108,6 +111,55 @@ class HostControlConcurrencyContracts(unittest.TestCase):
             dispatch.start(),
             "SO_NOSIGPIPE must be applied before client work is dispatched",
         )
+
+    def test_host_control_accepts_bounded_multi_megabyte_json_requests(self):
+        self.assertRegex(
+            self.reader_source,
+            r"MaxRequestBytes\s*=\s*16\s*\*\s*1024\s*\*\s*1024",
+            "file_put JSON requests need a documented bounded size above 10 KB",
+        )
+        self.assertNotIn("while accumulated.count < 4096", self.source)
+        self.assertIn("VPhoneHostRequestReader.readLine", self.source)
+
+    def test_slow_clients_are_bounded_by_deadlines_and_slots(self):
+        self.assertRegex(
+            self.source,
+            r"fcntl\([^;]+F_SETFL[^;]+O_NONBLOCK",
+        )
+        self.assertRegex(
+            self.source,
+            r"MaxActiveClients\s*=\s*8\b",
+        )
+        self.assertRegex(
+            self.source,
+            r"clientSlots\.wait\(timeout:\s*\.now\(\)\)",
+        )
+        self.assertRegex(
+            self.source,
+            r"defer\s*\{\s*clientSlots\.signal\(\)\s*\}",
+        )
+        self.assertRegex(
+            self.reader_source,
+            r"RequestTimeoutNanoseconds\s*=\s*10\s*\*\s*NSEC_PER_SEC",
+        )
+        self.assertRegex(
+            self.reader_source,
+            r"ResponseTimeoutNanoseconds\s*=\s*10\s*\*\s*NSEC_PER_SEC",
+        )
+        self.assertIn("DispatchTime.now().uptimeNanoseconds", self.reader_source)
+        self.assertRegex(self.reader_source, r"Darwin\.poll\(")
+        self.assertIn("VPhoneHostResponseWriter.writeAll", self.source)
+
+    def test_action_timing_parameters_are_validated_before_conversion(self):
+        self.assertIn(
+            "VPhoneHostRequestTiming.screenDelayMilliseconds",
+            self.source,
+        )
+        self.assertIn(
+            "VPhoneHostRequestTiming.swipeDurationMilliseconds",
+            self.source,
+        )
+        self.assertNotRegex(self.source, r"UInt64\((?:screenDelay|totalDelay|durationMs)\)")
 
 
 if __name__ == "__main__":
