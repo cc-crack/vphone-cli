@@ -7,6 +7,7 @@
 
 #import "vphoned_url.h"
 #import "vphoned_protocol.h"
+#include <dlfcn.h>
 #include <objc/message.h>
 
 const NSTimeInterval VPURLCommandTimeoutSeconds = 5.0;
@@ -57,6 +58,29 @@ static BOOL vp_begin_url_open(void) {
   return YES;
 }
 
+static NSDictionary *vp_url_open_options(void) {
+  static NSDictionary *options;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    void *frontBoard = dlopen(
+        "/System/Library/PrivateFrameworks/FrontBoardServices.framework/"
+        "FrontBoardServices",
+        RTLD_LAZY | RTLD_LOCAL);
+    NSString *const *unlockKeyPointer = frontBoard
+        ? (NSString *const *)dlsym(
+              frontBoard, "FBSOpenApplicationOptionKeyUnlockDevice")
+        : NULL;
+    NSString *unlockKey = unlockKeyPointer ? *unlockKeyPointer : nil;
+    if (unlockKey) {
+      options = @{unlockKey : @YES};
+    } else {
+      NSLog(@"vphoned: FrontBoard unlock option unavailable");
+      options = @{};
+    }
+  });
+  return options;
+}
+
 NSDictionary *vp_handle_url_command(NSDictionary *msg) {
   id reqId = msg[@"id"];
   NSString *urlStr = msg[@"url"];
@@ -90,15 +114,16 @@ NSDictionary *vp_handle_url_command(NSDictionary *msg) {
 
         SEL openURLSel = sel_registerName("openURL:withOptions:");
         if ([ws respondsToSelector:openURLSel]) {
-          ok =
-              ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, openURLSel, url, nil);
+          ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(
+              ws, openURLSel, url, vp_url_open_options());
         }
 
         if (!ok) {
           SEL sensitiveSel = sel_registerName("openSensitiveURL:withOptions:");
           if ([ws respondsToSelector:sensitiveSel]) {
             ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, sensitiveSel,
-                                                           url, nil);
+                                                           url,
+                                                           vp_url_open_options());
           }
         }
 

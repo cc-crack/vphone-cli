@@ -67,6 +67,17 @@ class VphonedURLTimeoutContracts(unittest.TestCase):
             "vphoned_url must return one response object, not write late responses itself",
         )
 
+    def test_open_url_requests_unlock_for_passwordless_automation_vm(self):
+        self.assertIn("FBSOpenApplicationOptionKeyUnlockDevice", self.impl)
+        self.assertRegex(
+            self.impl,
+            r"dlsym\([^;]+FBSOpenApplicationOptionKeyUnlockDevice",
+        )
+        self.assertRegex(
+            self.impl,
+            r"openURLSel,\s*url,\s*vp_url_open_options\(\)",
+        )
+
 
 class HostControlConcurrencyContracts(unittest.TestCase):
     def setUp(self):
