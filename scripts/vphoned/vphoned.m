@@ -20,6 +20,7 @@
 #include <mach-o/dyld.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <stdatomic.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -50,8 +51,9 @@
 #define VPHONED_BUILD_HASH "unknown"
 #endif
 
-static BOOL gClipboardAvailable = NO;
-static BOOL gAppsAvailable = NO;
+static atomic_bool gHIDAvailable = ATOMIC_VAR_INIT(false);
+static atomic_bool gClipboardAvailable = ATOMIC_VAR_INIT(false);
+static atomic_bool gAppsAvailable = ATOMIC_VAR_INIT(false);
 
 #define INSTALL_PATH "/usr/bin/vphoned"
 #define CACHE_PATH "/var/root/Library/Caches/vphoned"
@@ -64,6 +66,21 @@ struct sockaddr_vm {
   __uint32_t svm_port;
   __uint32_t svm_cid;
 };
+
+static BOOL vp_service_available(atomic_bool *flag) {
+  return atomic_load_explicit(flag, memory_order_acquire);
+}
+
+static void vp_service_mark_available(atomic_bool *flag) {
+  atomic_store_explicit(flag, true, memory_order_release);
+}
+
+static NSMutableDictionary *vp_service_unavailable_response(NSString *service,
+                                                            id reqId) {
+  NSMutableDictionary *r = vp_make_response(@"err", reqId);
+  r[@"msg"] = [NSString stringWithFormat:@"%@ not available", service];
+  return r;
+}
 
 // MARK: - Self-hash
 
@@ -190,6 +207,8 @@ static NSDictionary *handle_command(NSDictionary *msg) {
   id reqId = msg[@"id"];
 
   if ([type isEqualToString:@"hid"]) {
+    if (!vp_service_available(&gHIDAvailable))
+      return vp_service_unavailable_response(@"hid", reqId);
     uint32_t page = [msg[@"page"] unsignedIntValue];
     uint32_t usage = [msg[@"usage"] unsignedIntValue];
     NSNumber *downVal = msg[@"down"];
@@ -202,6 +221,8 @@ static NSDictionary *handle_command(NSDictionary *msg) {
   }
 
   if ([type isEqualToString:@"touch"]) {
+    if (!vp_service_available(&gHIDAvailable))
+      return vp_service_unavailable_response(@"touch", reqId);
     int phase = [msg[@"phase"] intValue];
     double x = [msg[@"x"] doubleValue];
     double y = [msg[@"y"] doubleValue];
@@ -327,19 +348,22 @@ static BOOL handle_client(int fd) {
     }
 
     // Build capabilities list
-    NSMutableArray *caps = [NSMutableArray
-        arrayWithObjects:@"hid", @"devmode", @"file", @"keychain", nil];
+    NSMutableArray *caps =
+        [NSMutableArray arrayWithObjects:@"devmode", @"file", @"keychain", nil];
+    if (vp_service_available(&gHIDAvailable))
+      [caps addObject:@"hid"];
     if (vp_location_available())
       [caps addObject:@"location"];
     if (vp_custom_installer_available())
       [caps addObject:@"ipa_install"];
-    if (gClipboardAvailable)
+    if (vp_service_available(&gClipboardAvailable))
       [caps addObject:@"clipboard"];
-    if (gAppsAvailable)
+    if (vp_service_available(&gAppsAvailable))
       [caps addObject:@"apps"];
     [caps addObject:@"url"];
     [caps addObject:@"settings"];
-    [caps addObject:@"touch"];
+    if (vp_service_available(&gHIDAvailable))
+      [caps addObject:@"touch"];
 
     NSMutableDictionary *helloResp = [@{
       @"v" : @PROTOCOL_VERSION,
@@ -486,14 +510,49 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
-    if (!vp_hid_load())
-      return 1;
     if (!vp_devmode_load())
       NSLog(@"vphoned: XPC unavailable, devmode disabled");
     vp_location_load();
+    dispatch_queue_attr_t optionalServiceAttr =
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT,
+                                                QOS_CLASS_UTILITY, 0);
+    dispatch_queue_t optionalServiceQueue =
+        dispatch_queue_create("com.vphone.vphoned.optional-services",
+                              optionalServiceAttr);
 
-    gClipboardAvailable = vp_clipboard_load();
-    gAppsAvailable = vp_apps_load();
+    dispatch_async(optionalServiceQueue, ^{
+      @autoreleasepool {
+        NSLog(@"vphoned: optional service hid start");
+        if (vp_hid_load()) {
+          vp_service_mark_available(&gHIDAvailable);
+          NSLog(@"vphoned: optional service hid ready");
+        } else {
+          NSLog(@"vphoned: optional service hid unavailable");
+        }
+      }
+    });
+    dispatch_async(optionalServiceQueue, ^{
+      @autoreleasepool {
+        NSLog(@"vphoned: optional service clipboard start");
+        if (vp_clipboard_load()) {
+          vp_service_mark_available(&gClipboardAvailable);
+          NSLog(@"vphoned: optional service clipboard ready");
+        } else {
+          NSLog(@"vphoned: optional service clipboard unavailable");
+        }
+      }
+    });
+    dispatch_async(optionalServiceQueue, ^{
+      @autoreleasepool {
+        NSLog(@"vphoned: optional service apps start");
+        if (vp_apps_load()) {
+          vp_service_mark_available(&gAppsAvailable);
+          NSLog(@"vphoned: optional service apps ready");
+        } else {
+          NSLog(@"vphoned: optional service apps unavailable");
+        }
+      }
+    });
     vp_vcam_start();
 
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
