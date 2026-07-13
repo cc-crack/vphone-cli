@@ -1,9 +1,170 @@
 import AppKit
-import ImageIO
 import AVFoundation
+import CoreImage
 import CoreVideo
+import IOSurface
+import ImageIO
 import ObjectiveC.runtime
 import Virtualization
+
+private final class ScreenshotCallbackBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didResume = false
+    private let completion: (CGImage?) -> Void
+
+    init(completion: @escaping (CGImage?) -> Void) {
+        self.completion = completion
+    }
+
+    func resumeOnce(_ image: CGImage?) {
+        lock.lock()
+        guard !didResume else {
+            lock.unlock()
+            return
+        }
+        didResume = true
+        lock.unlock()
+
+        completion(image)
+    }
+}
+
+private final class ScreenshotObjectConverter: @unchecked Sendable {
+    private static let cfBackedClassNamePrefixes = [
+        "CGImage",
+        "CVPixelBuffer",
+        "IOSurface",
+        "_IOSurface",
+        "__CVBuffer",
+        "__NSCF",
+    ]
+
+    private let lock = NSLock()
+    private var loggedCallbackObjects = Set<String>()
+    private var loggedAcceptedDimensions = Set<String>()
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    func convert(_ imageObject: AnyObject?) -> CGImage? {
+        guard let imageObject else {
+            print("[record] screenshot callback object nil")
+            return nil
+        }
+
+        let className = dynamicClassName(for: imageObject)
+        let cfTypeID = safeCFTypeID(imageObject, className: className)
+        logCallbackObject(className: className, cfTypeID: cfTypeID)
+
+        if let error = imageObject as? NSError {
+            print(
+                "[record] screenshot callback error: domain=\(error.domain) code=\(error.code) "
+                    + "description=\(error.localizedDescription)"
+            )
+            return nil
+        }
+
+        if let nsImage = imageObject as? NSImage,
+           let cgImage = cgImage(from: nsImage)
+        {
+            return accept(cgImage, source: "NSImage")
+        }
+
+        if let ciImage = imageObject as? CIImage {
+            return renderCIImage(ciImage, source: "CIImage")
+        }
+
+        guard let cfTypeID else {
+            print("[record] screenshot callback unsupported: class=\(className) CF type ID=unavailable")
+            return nil
+        }
+
+        if cfTypeID == CGImage.typeID {
+            let cgImage = unsafeDowncast(imageObject, to: CGImage.self)
+            return accept(cgImage, source: "CGImage")
+        }
+
+        if cfTypeID == CVPixelBufferGetTypeID() {
+            let pixelBuffer = unsafeDowncast(imageObject, to: CVPixelBuffer.self)
+            return renderCIImage(CIImage(cvPixelBuffer: pixelBuffer), source: "CVPixelBuffer")
+        }
+
+        if cfTypeID == IOSurfaceGetTypeID() {
+            let surface = unsafeDowncast(imageObject, to: IOSurface.self)
+            let ciImage = CIImage(ioSurface: surface)
+            return renderCIImage(ciImage, source: "IOSurface")
+        }
+
+        print("[record] screenshot callback unsupported: class=\(className) CF type ID=\(cfTypeID)")
+        return nil
+    }
+
+    private func cgImage(from nsImage: NSImage) -> CGImage? {
+        if Thread.isMainThread {
+            return nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+
+        var image: CGImage?
+        DispatchQueue.main.sync {
+            image = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+        return image
+    }
+
+    private func renderCIImage(_ ciImage: CIImage, source: String) -> CGImage? {
+        let extent = ciImage.extent.integral
+        guard extent.width.isFinite, extent.height.isFinite,
+              extent.width > 0, extent.height > 0
+        else {
+            print("[record] screenshot \(source) conversion failed: empty extent \(ciImage.extent)")
+            return nil
+        }
+
+        guard let cgImage = ciContext.createCGImage(ciImage, from: extent) else {
+            print("[record] screenshot \(source) conversion failed: CoreImage render returned nil")
+            return nil
+        }
+
+        return accept(cgImage, source: source)
+    }
+
+    private func accept(_ cgImage: CGImage, source: String) -> CGImage {
+        let key = "\(source):\(cgImage.width)x\(cgImage.height)"
+        if shouldLogOnce(&loggedAcceptedDimensions, key: key) {
+            print(
+                "[record] accepted image dimensions source=\(source) "
+                    + "width=\(cgImage.width) height=\(cgImage.height)"
+            )
+        }
+        return cgImage
+    }
+
+    private func logCallbackObject(className: String, cfTypeID: CFTypeID?) {
+        let cfDescription = cfTypeID.map(String.init) ?? "unavailable"
+        let key = "\(className):\(cfDescription)"
+        if shouldLogOnce(&loggedCallbackObjects, key: key) {
+            print(
+                "[record] screenshot callback object dynamic class=\(className) "
+                    + "CF type ID=\(cfDescription)"
+            )
+        }
+    }
+
+    private func shouldLogOnce(_ set: inout Set<String>, key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return set.insert(key).inserted
+    }
+
+    private func dynamicClassName(for object: AnyObject) -> String {
+        String(cString: object_getClassName(object))
+    }
+
+    private func safeCFTypeID(_ object: AnyObject, className: String) -> CFTypeID? {
+        guard Self.cfBackedClassNamePrefixes.contains(where: { className.hasPrefix($0) }) else {
+            return nil
+        }
+        return CFGetTypeID(object as CFTypeRef)
+    }
+}
 
 // MARK: - Screen Recorder
 
@@ -44,6 +205,8 @@ class VPhoneScreenRecorder {
     private var captureModeDescription = "private VZGraphicsDisplay screenshots"
     private var screenshotInFlight = false
     private var didLogCaptureFailure = false
+    private var didLogScreenshotSelectorEncoding = false
+    private let screenshotObjectConverter = ScreenshotObjectConverter()
 
     var isRecording: Bool {
         writer?.status == .writing
@@ -92,6 +255,7 @@ class VPhoneScreenRecorder {
         frameCount = 0
         screenshotInFlight = false
         didLogCaptureFailure = false
+        didLogScreenshotSelectorEncoding = false
 
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) {
             [weak self] _ in
@@ -122,6 +286,7 @@ class VPhoneScreenRecorder {
         graphicsDisplay = nil
         screenshotInFlight = false
         didLogCaptureFailure = false
+        didLogScreenshotSelectorEncoding = false
 
         if let url {
             print("[record] saved - \(url.path)")
@@ -216,22 +381,7 @@ class VPhoneScreenRecorder {
             return cgImage
         }
 
-        if let cgImage = captureViewSnapshot(view) {
-            print("[record] graphics screenshot returned no image; used AppKit view snapshot")
-            return cgImage
-        }
-
         throw CaptureError.captureFailed
-    }
-
-    private func captureViewSnapshot(_ view: NSView) -> CGImage? {
-        let bounds = view.bounds
-        guard bounds.width > 0, bounds.height > 0,
-              let bitmap = view.bitmapImageRepForCachingDisplay(in: bounds)
-        else { return nil }
-
-        view.cacheDisplay(in: bounds, to: bitmap)
-        return bitmap.cgImage
     }
 
     private func appendFrame(from adaptor: AVAssetWriterInputPixelBufferAdaptor, cgImage: CGImage) {
@@ -282,19 +432,27 @@ class VPhoneScreenRecorder {
         completion: @escaping (CGImage?) -> Void
     ) {
         let selector = NSSelectorFromString("_takeScreenshotWithCompletionHandler:")
+        let callbackBox = ScreenshotCallbackBox(completion: completion)
         guard graphicsDisplay.responds(to: selector),
               let cls = object_getClass(graphicsDisplay),
               let method = class_getInstanceMethod(cls, selector)
         else {
-            completion(nil)
+            callbackBox.resumeOnce(nil)
             return
+        }
+
+        if !didLogScreenshotSelectorEncoding {
+            let encoding = method_getTypeEncoding(method).map { String(cString: $0) } ?? "unavailable"
+            print("[record] screenshot selector method encoding: \(encoding)")
+            didLogScreenshotSelectorEncoding = true
         }
 
         let implementation = method_getImplementation(method)
         let function = unsafeBitCast(implementation, to: ScreenshotIMP.self)
+        let converter = screenshotObjectConverter
 
-        let block: ScreenshotCompletionBlock = { [weak self] imageObject in
-            completion(self?.convertScreenshotObject(imageObject))
+        let block: ScreenshotCompletionBlock = { imageObject in
+            callbackBox.resumeOnce(converter.convert(imageObject))
         }
         let blockObject = unsafeBitCast(block, to: AnyObject.self)
         function(graphicsDisplay, selector, blockObject)
@@ -302,26 +460,13 @@ class VPhoneScreenRecorder {
 
     private func takeGraphicsScreenshot(from graphicsDisplay: VZGraphicsDisplay) async -> CGImage? {
         await withCheckedContinuation { continuation in
-            takeGraphicsScreenshot(from: graphicsDisplay) { cgImage in
+            let callbackBox = ScreenshotCallbackBox { cgImage in
                 continuation.resume(returning: cgImage)
             }
+            takeGraphicsScreenshot(from: graphicsDisplay) { cgImage in
+                callbackBox.resumeOnce(cgImage)
+            }
         }
-    }
-
-    private func convertScreenshotObject(_ imageObject: AnyObject?) -> CGImage? {
-        guard let imageObject else { return nil }
-
-        if let nsImage = imageObject as? NSImage {
-            return nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        }
-
-        let cfObject = imageObject as CFTypeRef
-        if CFGetTypeID(cfObject) == CGImage.typeID {
-            // CGImage is a CF type, not a Swift class - unsafeDowncast cannot be used here.
-            return (cfObject as! CGImage) // swiftlint:disable:this force_cast
-        }
-
-        return nil
     }
 
     private func recordingOutputURL() -> URL {
