@@ -111,6 +111,19 @@ class VphonedServiceContractsTests(unittest.TestCase):
             "app_foreground must return the MCP contract fields",
         )
 
+    def test_foreground_app_falls_back_to_bks_process_state(self) -> None:
+        apps_source = APPS_SOURCE.read_text()
+        self.assertIn("BKSApplicationStateMonitor", apps_source)
+        self.assertIn("BKSApplicationStateAppIsFrontmostKey", apps_source)
+        self.assertRegex(
+            apps_source,
+            r"applicationInfoForPID:[\s\S]{0,500}?boolValue",
+        )
+        self.assertRegex(
+            apps_source,
+            r"app_foreground[\s\S]{0,2200}?app_is_frontmost",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
