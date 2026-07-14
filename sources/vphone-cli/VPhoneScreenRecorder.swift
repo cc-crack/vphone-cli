@@ -210,12 +210,28 @@ class VPhoneScreenRecorder {
         }
     }
 
-    private func captureStillImage(from view: NSView) async throws -> CGImage {
+    func captureStillImage(from view: NSView) async throws -> CGImage {
         let source = try resolveCaptureSource(for: view)
-        guard let cgImage = await takeGraphicsScreenshot(from: source.graphicsDisplay) else {
-            throw CaptureError.captureFailed
+        if let cgImage = await takeGraphicsScreenshot(from: source.graphicsDisplay) {
+            return cgImage
         }
-        return cgImage
+
+        if let cgImage = captureViewSnapshot(view) {
+            print("[record] graphics screenshot returned no image; used AppKit view snapshot")
+            return cgImage
+        }
+
+        throw CaptureError.captureFailed
+    }
+
+    private func captureViewSnapshot(_ view: NSView) -> CGImage? {
+        let bounds = view.bounds
+        guard bounds.width > 0, bounds.height > 0,
+              let bitmap = view.bitmapImageRepForCachingDisplay(in: bounds)
+        else { return nil }
+
+        view.cacheDisplay(in: bounds, to: bitmap)
+        return bitmap.cgImage
     }
 
     private func appendFrame(from adaptor: AVAssetWriterInputPixelBufferAdaptor, cgImage: CGImage) {

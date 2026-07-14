@@ -14,6 +14,11 @@ extension VPhoneMenuController {
         appsListItem = browse
         menu.addItem(browse)
 
+        let tasks = makeItem("Task List", action: #selector(openTaskList))
+        tasks.isEnabled = false
+        taskListItem = tasks
+        menu.addItem(tasks)
+
         menu.addItem(NSMenuItem.separator())
 
         let openURL = makeItem("Open URL...", action: #selector(openURL))
@@ -34,6 +39,7 @@ extension VPhoneMenuController {
 
     func updateAppsAvailability(available: Bool) {
         appsListItem?.isEnabled = available
+        taskListItem?.isEnabled = available
     }
 
     func updateURLAvailability(available: Bool) {
@@ -45,7 +51,11 @@ extension VPhoneMenuController {
     }
 
     @objc func openAppBrowser() {
-        onAppsPressed?()
+        onAppsPressed?(.installed)
+    }
+
+    @objc func openTaskList() {
+        onAppsPressed?(.running)
     }
 
     @objc func installIPAFromDisk() {

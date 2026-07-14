@@ -145,6 +145,10 @@ setup_machine:
 		echo "Error: JB=1, DEV=1, EXP=1, and LESS=1 are mutually exclusive"; \
 		exit 1; \
 	fi
+	VM_DIR="$(VM_DIR)" \
+	CPU="$(CPU)" \
+	MEMORY="$(MEMORY)" \
+	DISK_SIZE="$(DISK_SIZE)" \
 	SUDO_PASSWORD="$(SUDO_PASSWORD)" \
 	INTERACTIVE="$(INTERACTIVE)" \
 	NO_BINPACK="$(NO_BINPACK)" \
@@ -232,12 +236,23 @@ vphoned:
 		|| (echo "Error: ldid not found. Run: brew install ldid-procursus" && exit 1)
 	$(MAKE) -C $(SCRIPTS)/vphoned GIT_HASH=$(GIT_HASH)
 	@echo "=== Signing vphoned ==="
-	cp $(SCRIPTS)/vphoned/vphoned $(VM_DIR)/.vphoned.signed
-	ldid \
-		-S$(SCRIPTS)/vphoned/entitlements.plist \
-		-M "-K$(SCRIPTS)/vphoned/signcert.p12" \
-		$(VM_DIR)/.vphoned.signed
-	@echo "  signed → $(VM_DIR)/.vphoned.signed"
+	@if [ -f "$(VM_DIR)/.vphoned.signed" ] && \
+	    [ "$(SCRIPTS)/vphoned/vphoned" -ot "$(VM_DIR)/.vphoned.signed" ] && \
+	    [ "$(SCRIPTS)/vphoned/entitlements.plist" -ot "$(VM_DIR)/.vphoned.signed" ] && \
+	    [ "$(SCRIPTS)/vphoned/signcert.p12" -ot "$(VM_DIR)/.vphoned.signed" ]; then \
+		echo "  signed up to date → $(VM_DIR)/.vphoned.signed"; \
+	else \
+		rm -rf "$(VM_DIR)/.vphoned-sign"; \
+		mkdir -p "$(VM_DIR)/.vphoned-sign"; \
+		cp "$(SCRIPTS)/vphoned/vphoned" "$(VM_DIR)/.vphoned-sign/vphoned"; \
+		ldid \
+			-S$(SCRIPTS)/vphoned/entitlements.plist \
+			-M "-K$(SCRIPTS)/vphoned/signcert.p12" \
+			"$(VM_DIR)/.vphoned-sign/vphoned"; \
+		cp "$(VM_DIR)/.vphoned-sign/vphoned" "$(VM_DIR)/.vphoned.signed"; \
+		rm -rf "$(VM_DIR)/.vphoned-sign"; \
+		echo "  signed → $(VM_DIR)/.vphoned.signed"; \
+	fi
 
 # ═══════════════════════════════════════════════════════════════════
 # VM management

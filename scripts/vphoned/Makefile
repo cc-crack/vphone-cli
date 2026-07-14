@@ -20,6 +20,7 @@ $(OUT): $(SRCS) $(wildcard *.h)
 		-larchive \
 		-lsqlite3 \
 		-framework Foundation \
+		-framework IOKit \
 		-framework Security \
 		-framework CoreServices
 	@echo "  built OK"

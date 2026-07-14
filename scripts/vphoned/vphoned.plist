@@ -8,6 +8,14 @@
 	<array>
 		<string>/usr/bin/vphoned</string>
 	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>/dev/console</string>
+	<key>StandardErrorPath</key>
+	<string>/dev/console</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

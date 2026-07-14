@@ -36,6 +36,27 @@ public final class DeviceTreePatcher: Patcher {
         let value: PropertyValue
         let patchID: String
         let description: String
+        let addIfMissing: Bool
+
+        init(
+            nodePath: [String],
+            property: String,
+            length: Int,
+            flags: UInt16,
+            value: PropertyValue,
+            patchID: String,
+            description: String,
+            addIfMissing: Bool = false
+        ) {
+            self.nodePath = nodePath
+            self.property = property
+            self.length = length
+            self.flags = flags
+            self.value = value
+            self.patchID = patchID
+            self.description = description
+            self.addIfMissing = addIfMissing
+        }
     }
 
     /// A patch that adds a brand-new child node under an existing parent.
@@ -139,7 +160,123 @@ public final class DeviceTreePatcher: Patcher {
             flags: 0,
             value: .integer(144),
             patchID: "devicetree.island_notch_location",
-            description: "Set island notch location to 144"
+            description: "Set island notch location to 144",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "framebuffer-identifier",
+            length: 37,
+            flags: 0,
+            value: .string("A6AC96E7-C5D3-47A6-8967-A8B2D02F1C66"),
+            patchID: "devicetree.framebuffer_identifier",
+            description: "Set D47 framebuffer identifier",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "artwork-scale-factor",
+            length: 4,
+            flags: 0,
+            value: .integer(3),
+            patchID: "devicetree.artwork_scale_factor",
+            description: "Set artwork scale factor to 3"
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "artwork-display-gamut",
+            length: 3,
+            flags: 0,
+            value: .string("P3"),
+            patchID: "devicetree.artwork_display_gamut",
+            description: "Set artwork display gamut to P3"
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "artwork-device-idiom",
+            length: 6,
+            flags: 0,
+            value: .string("phone"),
+            patchID: "devicetree.artwork_device_idiom",
+            description: "Set artwork device idiom to phone"
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "display-corner-radius",
+            length: 8,
+            flags: 0,
+            value: .integer(0x0000000100000037),
+            patchID: "devicetree.display_corner_radius",
+            description: "Set D47 display corner radius",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "oled-display",
+            length: 4,
+            flags: 0,
+            value: .integer(1),
+            patchID: "devicetree.oled_display",
+            description: "Mark display as OLED",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "display-mirroring",
+            length: 4,
+            flags: 0,
+            value: .integer(1),
+            patchID: "devicetree.display_mirroring",
+            description: "Enable display mirroring trait",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "compatible-device-fallback",
+            length: 11,
+            flags: 0,
+            value: .string("iPhone16,1"),
+            patchID: "devicetree.compatible_device_fallback",
+            description: "Set compatible device fallback to iPhone16,1"
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "chrome-identifier",
+            length: 38,
+            flags: 0,
+            value: .string("com.apple.dt.devicekit.chrome.phone11"),
+            patchID: "devicetree.chrome_identifier",
+            description: "Set D47 chrome identifier"
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "thin-bezel",
+            length: 4,
+            flags: 0,
+            value: .integer(1),
+            patchID: "devicetree.thin_bezel",
+            description: "Enable thin bezel trait",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "ui-background-quality",
+            length: 4,
+            flags: 0,
+            value: .integer(100),
+            patchID: "devicetree.ui_background_quality",
+            description: "Set UI background quality",
+            addIfMissing: true
+        ),
+        PropertyPatch(
+            nodePath: ["device-tree", "product"],
+            property: "ui-weather-quality",
+            length: 4,
+            flags: 0,
+            value: .integer(100),
+            patchID: "devicetree.ui_weather_quality",
+            description: "Set UI weather quality",
+            addIfMissing: true
         ),
     ]
 
@@ -862,12 +999,19 @@ public final class DeviceTreePatcher: Patcher {
 
     /// Find a property by name within a node.
     private func findProperty(_ node: DTNode, name: String) throws -> DTProperty {
+        if let prop = findPropertyIfPresent(node, name: name) {
+            return prop
+        }
+        throw PatcherError.patchSiteNotFound("DeviceTree: missing property '\(name)'")
+    }
+
+    private func findPropertyIfPresent(_ node: DTNode, name: String) -> DTProperty? {
         for prop in node.properties {
             if prop.name == name {
                 return prop
             }
         }
-        throw PatcherError.patchSiteNotFound("DeviceTree: missing property '\(name)'")
+        return nil
     }
 
     // MARK: - Value Encoding
@@ -929,10 +1073,15 @@ public final class DeviceTreePatcher: Patcher {
             patchesToApply.append(contentsOf: Self.identityPropertyPatches)
         }
         for patch in patchesToApply {
-            let node = try resolveNode(root, path: patch.nodePath)
-            let prop = try findProperty(node, name: patch.property)
-
-            let originalBytes = Data(prop.value.prefix(patch.length))
+            let node: DTNode
+            do {
+                node = try resolveNode(root, path: patch.nodePath)
+            } catch PatcherError.patchSiteNotFound {
+                if verbose {
+                    print("  [skip] \(patch.patchID): node not present in this DeviceTree")
+                }
+                continue
+            }
 
             let newValue: Data = switch patch.value {
             case let .string(s):
@@ -943,6 +1092,31 @@ public final class DeviceTreePatcher: Patcher {
                 Self.encodeFixedBytes(d, length: patch.length)
             }
 
+            let prop: DTProperty
+            let originalBytes: Data
+            let fileOffset: Int
+            if let existing = findPropertyIfPresent(node, name: patch.property) {
+                prop = existing
+                originalBytes = Data(existing.value.prefix(patch.length))
+                fileOffset = existing.valueOffset
+            } else if patch.addIfMissing {
+                prop = DTProperty(
+                    name: patch.property,
+                    length: patch.length,
+                    flags: patch.flags,
+                    value: Data(),
+                    valueOffset: 0
+                )
+                node.properties.append(prop)
+                originalBytes = Data()
+                fileOffset = 0
+            } else {
+                if verbose {
+                    print("  [skip] \(patch.patchID): property not present in this DeviceTree")
+                }
+                continue
+            }
+
             prop.length = patch.length
             prop.flags = patch.flags
             prop.value = newValue
@@ -950,7 +1124,7 @@ public final class DeviceTreePatcher: Patcher {
             let record = PatchRecord(
                 patchID: patch.patchID,
                 component: component,
-                fileOffset: prop.valueOffset,
+                fileOffset: fileOffset,
                 virtualAddress: nil,
                 originalBytes: originalBytes,
                 patchedBytes: newValue,

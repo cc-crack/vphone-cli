@@ -133,13 +133,32 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         platform.hardwareModel = hwModel
 
         // Set NVRAM boot-args to enable serial output
-        let bootArgs = "serial=3 debug=0x104c04"
+        let bootArgs = "serial=3 -v debug=0x2014e -apfs_shared_datavolume keybag_initlog"
         if let bootArgsData = bootArgs.data(using: .utf8) {
             let ok =
                 Dynamic(auxStorage)
                     ._setDataValue(bootArgsData, forNVRAMVariableNamed: "boot-args", error: nil)
                     .asBool ?? false
             if ok { print("[vphone] NVRAM boot-args: \(bootArgs)") }
+        }
+        Self.patchAuxiliaryBootArgsStub(at: options.nvramURL, bootArgs: bootArgs)
+        let recoveryNVRAMVariables = [
+            "boot-command",
+            "boot-mode",
+            "recovery-boot-mode",
+            "upgrade-boot",
+            "obliteration",
+            "ota-uuid",
+        ]
+        for name in recoveryNVRAMVariables {
+            _ = Dynamic(auxStorage)
+                ._removeNVRAMVariableNamed(name, error: nil)
+                .asBool
+        }
+        if let autoBootData = "true".data(using: .utf8) {
+            _ = Dynamic(auxStorage)
+                ._setDataValue(autoBootData, forNVRAMVariableNamed: "auto-boot", error: nil)
+                .asBool
         }
 
         // --- Boot loader with custom ROM ---
@@ -330,6 +349,57 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         MACHINE_IDENTIFIER=config.plist
         """
         try content.write(to: outputURL, atomically: true, encoding: .utf8)
+    }
+
+    private static func patchAuxiliaryBootArgsStub(at nvramURL: URL, bootArgs: String) {
+        let legacyBootArgs = "serial=3 -v debug=0x2014e %s"
+        let replacementBootArgs = "\(bootArgs) %s"
+
+        guard
+            let legacyData = legacyBootArgs.data(using: .utf8),
+            let replacementData = replacementBootArgs.data(using: .utf8)
+        else {
+            print("[vphone] Warning: failed to encode auxiliary boot-args stub")
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: nvramURL)
+            if data.range(of: replacementData) != nil {
+                print("[vphone] Auxiliary boot-args stub already patched")
+                return
+            }
+
+            guard let range = data.range(of: legacyData) else {
+                print("[vphone] Warning: auxiliary boot-args stub not found")
+                return
+            }
+
+            var capacity = range.count
+            var index = range.upperBound
+            while index < data.count && data[index] == 0 {
+                capacity += 1
+                index += 1
+            }
+
+            var payload = replacementData
+            payload.append(0)
+            guard payload.count <= capacity else {
+                print(
+                    "[vphone] Warning: auxiliary boot-args stub too small "
+                        + "(\(capacity) bytes for \(payload.count) bytes)"
+                )
+                return
+            }
+
+            let handle = try FileHandle(forUpdating: nvramURL)
+            handle.seek(toFileOffset: UInt64(range.lowerBound))
+            handle.write(payload)
+            handle.closeFile()
+            print("[vphone] Auxiliary boot-args stub: \(replacementBootArgs)")
+        } catch {
+            print("[vphone] Warning: failed to patch auxiliary boot-args stub: \(error)")
+        }
     }
 
     // MARK: - Battery

@@ -6,13 +6,19 @@ class VPhoneAppWindowController {
     private var window: NSWindow?
     private var model: VPhoneAppBrowserModel?
 
-    func showWindow(control: VPhoneControl) {
+    func showWindow(
+        control: VPhoneControl,
+        initialFilter: VPhoneAppBrowserModel.AppFilter = .installed
+    ) {
         if let window {
+            model?.filter = initialFilter
+            window.title = windowTitle(for: initialFilter)
             window.makeKeyAndOrderFront(nil)
             return
         }
 
         let model = VPhoneAppBrowserModel(control: control)
+        model.filter = initialFilter
         self.model = model
 
         let view = VPhoneAppBrowserView(model: model)
@@ -24,7 +30,7 @@ class VPhoneAppWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Apps"
+        window.title = windowTitle(for: initialFilter)
         window.subtitle = "vphone"
         window.contentView = hostingView
         window.contentMinSize = NSSize(width: 450, height: 300)
@@ -49,5 +55,9 @@ class VPhoneAppWindowController {
                 self?.model = nil
             }
         }
+    }
+
+    private func windowTitle(for filter: VPhoneAppBrowserModel.AppFilter) -> String {
+        filter == .running ? "Task List" : "Apps"
     }
 }

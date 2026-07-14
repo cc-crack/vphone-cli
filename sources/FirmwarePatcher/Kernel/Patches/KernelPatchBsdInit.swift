@@ -75,14 +75,19 @@ extension KernelPatcher {
 
         for (adrpOff, addOff) in refs {
             // Step 3: scan forward from the ADD for BL _panic (up to 0x40 bytes).
+            // iOS 26.5.x routes this panic through a local panic helper instead
+            // of branching directly to the global _panic symbol, so fall back to
+            // the first BL after the anchored panic string.
             let fwdLimit = min(addOff + 0x40, buffer.count - 4)
             var blPanicOff: Int? = nil
+            var firstBLOff: Int? = nil
 
             var scan = addOff
             while scan <= fwdLimit {
                 let insn = buffer.readU32(at: scan)
                 // BL: top 6 bits = 0b100101
                 if insn >> 26 == 0b100101 {
+                    if firstBLOff == nil { firstBLOff = scan }
                     let imm26 = insn & 0x03FF_FFFF
                     let signedImm = Int32(bitPattern: imm26 << 6) >> 6
                     let target = scan + Int(signedImm) * 4
@@ -94,7 +99,7 @@ extension KernelPatcher {
                 scan += 4
             }
 
-            guard let blPanic = blPanicOff else { continue }
+            guard let blPanic = blPanicOff ?? firstBLOff else { continue }
 
             // Step 4: search backward from adrpOff for a conditional branch whose
             // target lands in the error block [blPanic - 0x40, blPanic + 4).

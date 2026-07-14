@@ -253,9 +253,7 @@ class VPhoneVirtualMachineView: VZVirtualMachineView {
 
     @discardableResult
     private func sendTouchEvent(phase: Int, localPoint: NSPoint, timestamp: TimeInterval) -> Bool {
-        guard let device = multiTouchDevice,
-              virtualMachine != nil
-        else { return false }
+        guard let device = multiTouchDevice else { return false }
 
         let normalizedPoint = normalizeCoordinate(localPoint)
 
@@ -276,6 +274,7 @@ class VPhoneVirtualMachineView: VZVirtualMachineView {
         let touchEvent = Dynamic._VZMultiTouchEvent(touches: [touchObj])
         guard let eventObj = touchEvent.asObject else { return false }
 
+        print("[vphone] touch phase=\(phase) point=\(normalizedPoint) aim=\(currentTouchSwipeAim)")
         Dynamic(device).sendMultiTouchEvents([eventObj] as NSArray)
         return true
     }
@@ -310,8 +309,10 @@ class VPhoneVirtualMachineView: VZVirtualMachineView {
 
         let distLeft = point.x
         let distRight = w - point.x
-        let distTop = isFlipped ? point.y : (h - point.y)
-        let distBottom = isFlipped ? (h - point.y) : point.y
+        let topCode = 1
+        let bottomCode = 2
+        let distTop = isFlipped ? point.y : h - point.y
+        let distBottom = isFlipped ? h - point.y : point.y
 
         var minDist = distLeft
         var edgeCode = 8 // Left
@@ -323,12 +324,12 @@ class VPhoneVirtualMachineView: VZVirtualMachineView {
 
         if distBottom < minDist {
             minDist = distBottom
-            edgeCode = 2 // Bottom (Home bar swipe up)
+            edgeCode = bottomCode
         }
 
         if distTop < minDist {
             minDist = distTop
-            edgeCode = 1 // Top (Notification Center)
+            edgeCode = topCode
         }
 
         return minDist < edgeThreshold ? edgeCode : 0

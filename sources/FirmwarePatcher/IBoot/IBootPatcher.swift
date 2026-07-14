@@ -19,12 +19,13 @@ public class IBootPatcher: Patcher {
         case ibss
         case ibec
         case llb
+        case iboot
     }
 
     // MARK: - Constants
 
     /// Default custom boot-args string (Python: IBootPatcher.BOOT_ARGS)
-    static let bootArgs = "serial=3 -v debug=0x2014e %s"
+    static let bootArgs = "serial=3 -v debug=0x2014e -apfs_shared_datavolume keybag_initlog %s"
 
     /// Chunked disassembly parameters (Python: CHUNK_SIZE, OVERLAP)
     private static let chunkSize = 0x2000
@@ -57,7 +58,7 @@ public class IBootPatcher: Patcher {
         patchSerialLabels()
         patchImage4Callback()
 
-        if mode == .llb {
+        if mode == .ibec || mode == .llb || mode == .iboot {
             patchBootArgs()
         }
 
@@ -199,6 +200,7 @@ public class IBootPatcher: Patcher {
         case .ibss: "Loaded iBSS"
         case .ibec: "Loaded iBEC"
         case .llb: "Loaded LLB"
+        case .iboot: "Loaded iBoot"
         }
         guard let labelBytes = labelStr.data(using: .ascii) else { return }
 
@@ -303,7 +305,7 @@ public class IBootPatcher: Patcher {
         emit(off + 4, ARM64.movX0_0, id: "\(component).image4_callback_mov", description: "image4 callback: mov x0,x22 → mov x0,#0")
     }
 
-    // MARK: - 3. Boot-Args (iBEC / LLB)
+    // MARK: - 3. Boot-Args (iBEC / LLB / iBoot)
 
     /// Redirect ADRP+ADD x2 to a custom boot-args string.
     /// Python: `patch_boot_args()`

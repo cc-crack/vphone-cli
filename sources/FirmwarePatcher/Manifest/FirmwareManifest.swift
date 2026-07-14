@@ -2,9 +2,8 @@
 //
 // Translated from: scripts/fw_manifest.py
 //
-// Merges cloudOS boot-chain (vresearch101ap) with vphone600 runtime components
-// (device tree, SEP, kernel) and iPhone OS images into a single DFU erase-install
-// Build Identity.
+// Merges cloudOS boot-chain (vresearch101ap) with a compatible runtime component
+// set and iPhone OS images into a single DFU erase-install Build Identity.
 
 import Foundation
 
@@ -18,8 +17,10 @@ public typealias PlistDict = [String: Any]
 /// Generates hybrid BuildManifest and Restore plists for VM firmware.
 ///
 /// The VM hardware identifies as vresearch101ap (BDID 0x90) in DFU mode, so the
-/// identity fields must match for TSS/SHSH signing.  Runtime components use the
-/// vphone600 variant because its device tree sets MKB dt=1 (keybag-less boot).
+/// identity fields must match for TSS/SHSH signing. Older cloudOS builds expose
+/// a vphone600 runtime variant whose device tree sets MKB dt=1 (keybag-less boot).
+/// Newer cloudOS builds removed vphone600, so the generator falls back to
+/// vresearch101 runtime components when that variant is absent.
 public enum FirmwareManifest {
     // MARK: - Errors
 
@@ -51,9 +52,9 @@ public enum FirmwareManifest {
         let prod: Int
         /// vresearch101ap research identity (research iBoot, TXM).
         let res: Int
-        /// vphone600ap release identity (device tree, SEP, restore kernel).
+        /// Runtime release identity (device tree, SEP, restore kernel).
         let vp: Int
-        /// vphone600ap research identity (kernel cache).
+        /// Runtime research identity (kernel cache).
         let vpr: Int
         /// iPhone erase identity (OS images).
         let iPhoneErase: Int
@@ -87,12 +88,14 @@ public enum FirmwareManifest {
 
         // Discover source identities.
         let (prod, res) = try findCloudOS(cloudIdentities, deviceClass: "vresearch101ap")
-        let (vp, vpr) = try findCloudOS(cloudIdentities, deviceClass: "vphone600ap")
+        let runtime = findCloudOSIfPresent(cloudIdentities, deviceClass: "vphone600ap")
+        let runtimeDeviceClass = runtime == nil ? "vresearch101ap" : "vphone600ap"
+        let (vp, vpr) = runtime ?? (prod, res)
         let iErase = try findIPhoneErase(iPhoneIdentities)
 
         if verbose {
             print("  cloudOS vresearch101ap: release=#\(prod), research=#\(res)")
-            print("  cloudOS vphone600ap:    release=#\(vp), research=#\(vpr)")
+            print("  cloudOS runtime (\(runtimeDeviceClass)): release=#\(vp), research=#\(vpr)")
             print("  iPhone  erase: #\(iErase)")
         }
 
@@ -169,6 +172,14 @@ public enum FirmwareManifest {
         return (rel, res)
     }
 
+    /// Return release and research identity indices, or nil when absent.
+    static func findCloudOSIfPresent(
+        _ identities: [PlistDict],
+        deviceClass: String
+    ) -> (release: Int, research: Int)? {
+        try? findCloudOS(identities, deviceClass: deviceClass)
+    }
+
     /// Return the index of the first iPhone erase identity.
     static func findIPhoneErase(_ identities: [PlistDict]) throws -> Int {
         for (i, bi) in identities.enumerated() {
@@ -197,6 +208,18 @@ public enum FirmwareManifest {
             throw ManifestError.missingKey("\(key) in identity #\(idx)")
         }
         return deepCopyPlistDict(value)
+    }
+
+    /// True when a Manifest entry exists in a build identity.
+    static func hasEntry(
+        _ identities: [PlistDict],
+        _ idx: Int,
+        _ key: String
+    ) -> Bool {
+        guard let manifest = identities[idx]["Manifest"] as? PlistDict else {
+            return false
+        }
+        return manifest[key] != nil
     }
 
     /// Build the single DFU erase identity by merging components from multiple sources.
@@ -261,20 +284,22 @@ public enum FirmwareManifest {
         m["Ap,SecurePageTableMonitor"] = try entry(C, prod, "Ap,SecurePageTableMonitor")
         m["Ap,TrustedExecutionMonitor"] = try entry(C, res, "Ap,TrustedExecutionMonitor")
 
-        // Device tree (vphone600ap -- sets MKB dt=1 for keybag-less boot).
+        // Device tree (runtime variant).
         m["DeviceTree"] = try entry(C, vp, "DeviceTree")
         m["RestoreDeviceTree"] = try entry(C, vp, "RestoreDeviceTree")
 
-        // SEP (vphone600 -- matches device tree).
+        // SEP (matches device tree).
         m["SEP"] = try entry(C, vp, "SEP")
         m["RestoreSEP"] = try entry(C, vp, "RestoreSEP")
 
-        // Kernel (vphone600, patched by fw_patch).
+        // Kernel (patched by fw_patch).
         m["KernelCache"] = try entry(C, vpr, "KernelCache") // research
         m["RestoreKernelCache"] = try entry(C, vp, "RestoreKernelCache") // release
 
-        // Recovery mode (vphone600ap carries this entry).
-        m["RecoveryMode"] = try entry(C, vp, "RecoveryMode")
+        // Recovery mode (runtime variant; absent on newer vresearch101-only builds).
+        if hasEntry(C, vp, "RecoveryMode") {
+            m["RecoveryMode"] = try entry(C, vp, "RecoveryMode")
+        }
 
         // CloudOS erase ramdisk.
         m["RestoreRamDisk"] = try entry(C, prod, "RestoreRamDisk")

@@ -25,7 +25,12 @@ extension KernelPatcher {
         }
 
         let apfsRange = apfsTextRange()
-        let refs = findStringRefs(in: apfsRange, stringOffset: strOff)
+        var refs = findStringRefs(in: apfsRange, stringOffset: strOff)
+        if refs.isEmpty, strOff > 0 {
+            // 26.5.x APFS references the full panic format string including
+            // the leading quote: "\"root volume seal is broken ...".
+            refs = findStringRefs(in: apfsRange, stringOffset: strOff - 1)
+        }
         if refs.isEmpty {
             log("  [-] no ADRP+ADD refs to 'root volume seal is broken'")
             return false
@@ -47,6 +52,21 @@ extension KernelPatcher {
                     break
                 }
                 scan += 4
+            }
+
+            // 26.5.x APFS routes this panic through a local helper instead
+            // of the global _panic target. If the string reference is exact
+            // enough, the first BL after it is the panic helper call.
+            if blOff == nil {
+                scan = addOff
+                while scan <= blScanEnd {
+                    let insn = buffer.readU32(at: scan)
+                    if insn >> 26 == 0b100101 {
+                        blOff = scan
+                        break
+                    }
+                    scan += 4
+                }
             }
 
             guard let confirmedBlOff = blOff else { continue }

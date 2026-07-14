@@ -11,7 +11,7 @@ class VPhoneMenuController {
 
     var onFilesPressed: (() -> Void)?
     var onKeychainPressed: (() -> Void)?
-    var onAppsPressed: (() -> Void)?
+    var onAppsPressed: ((VPhoneAppBrowserModel.AppFilter) -> Void)?
     var connectFileBrowserItem: NSMenuItem?
     var connectKeychainBrowserItem: NSMenuItem?
     var connectDevModeStatusItem: NSMenuItem?
@@ -21,6 +21,7 @@ class VPhoneMenuController {
     var clipboardGetItem: NSMenuItem?
     var clipboardSetItem: NSMenuItem?
     var appsListItem: NSMenuItem?
+    var taskListItem: NSMenuItem?
     var appsOpenURLItem: NSMenuItem?
     var settingsGetItem: NSMenuItem?
     var settingsSetItem: NSMenuItem?

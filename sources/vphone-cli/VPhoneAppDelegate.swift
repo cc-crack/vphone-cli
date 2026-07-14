@@ -23,7 +23,9 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_: Notification) {
+        VPhoneLog.redirectStandardStreams(to: cli.config)
         NSApp.setActivationPolicy(cli.noGraphics ? .prohibited : .regular)
+        print("[vphone] applicationDidFinishLaunching noGraphics=\(cli.noGraphics) dfu=\(cli.dfu)")
 
         signal(SIGINT, SIG_IGN)
         let src = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -133,9 +135,9 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
                 guard let keychainWC, let control else { return }
                 keychainWC.showWindow(control: control)
             }
-            mc.onAppsPressed = { [weak appWC, weak control] in
+            mc.onAppsPressed = { [weak appWC, weak control] initialFilter in
                 guard let appWC, let control else { return }
-                appWC.showWindow(control: control)
+                appWC.showWindow(control: control, initialFilter: initialFilter)
             }
             if let provider = locationProvider {
                 mc.locationProvider = provider

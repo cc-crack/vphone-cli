@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Generate hybrid BuildManifest.plist and Restore.plist for vresearch1 restore.
 
-Merges cloudOS boot-chain (vresearch101ap) with vphone600 runtime components
-(device tree, SEP, kernel) and iPhone OS images into a single DFU erase-install
-Build Identity.
+Merges cloudOS boot-chain (vresearch101ap) with a compatible runtime component
+set and iPhone OS images into a single DFU erase-install Build Identity.
 
 The VM hardware identifies as vresearch101ap (BDID 0x90) in DFU mode, so the
-identity fields must match for TSS/SHSH signing.  Runtime components use the
-vphone600 variant because its device tree sets MKB dt=1 (keybag-less boot).
+identity fields must match for TSS/SHSH signing.  Older cloudOS builds expose a
+vphone600 runtime variant whose device tree sets MKB dt=1 (keybag-less boot).
+Newer cloudOS builds removed vphone600, so we fall back to the vresearch101
+runtime components when that variant is absent.
 
 Usage:
     python3 fw_manifest.py <iphone_dir> <cloudos_dir>
@@ -29,6 +30,11 @@ def load(path):
 def entry(identities, idx, key):
     """Deep-copy a single Manifest entry from a build identity."""
     return copy.deepcopy(identities[idx]["Manifest"][key])
+
+
+def has_entry(identities, idx, key):
+    """Return true if a Manifest entry exists in a build identity."""
+    return key in identities[idx].get("Manifest", {})
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +75,14 @@ def find_cloudos(identities, device_class):
     return release, research
 
 
+def find_cloudos_optional(identities, device_class):
+    """Return release/research identity indices, or None when absent."""
+    try:
+        return find_cloudos(identities, device_class)
+    except KeyError:
+        return None
+
+
 def find_iphone_erase(identities):
     """Return the index of the first iPhone erase identity."""
     for i, bi in enumerate(identities):
@@ -100,13 +114,18 @@ def main():
 
     # ── Discover source identities ───────────────────────────────────
     #   PROD / RES  = vresearch101ap release / research  (boot chain)
-    #   VP   / VPR  = vphone600ap    release / research  (runtime)
+    #   VP   / VPR  = runtime release / research
     PROD, RES = find_cloudos(C, "vresearch101ap")
-    VP, VPR = find_cloudos(C, "vphone600ap")
+    runtime = find_cloudos_optional(C, "vphone600ap")
+    runtime_device = "vphone600ap"
+    if runtime is None:
+        runtime = (PROD, RES)
+        runtime_device = "vresearch101ap"
+    VP, VPR = runtime
     I_ERASE = find_iphone_erase(I)
 
     print(f"  cloudOS vresearch101ap: release=#{PROD}, research=#{RES}")
-    print(f"  cloudOS vphone600ap:    release=#{VP}, research=#{VPR}")
+    print(f"  cloudOS runtime ({runtime_device}): release=#{VP}, research=#{VPR}")
     print(f"  iPhone  erase: #{I_ERASE}")
 
     # ── Build the single DFU erase identity ──────────────────────────
@@ -160,20 +179,21 @@ def main():
     m["Ap,SecurePageTableMonitor"] = entry(C, PROD, "Ap,SecurePageTableMonitor")
     m["Ap,TrustedExecutionMonitor"] = entry(C, RES, "Ap,TrustedExecutionMonitor")
 
-    # ── Device tree (vphone600ap — sets MKB dt=1 for keybag-less boot)
+    # ── Device tree (runtime variant)
     m["DeviceTree"] = entry(C, VP, "DeviceTree")
     m["RestoreDeviceTree"] = entry(C, VP, "RestoreDeviceTree")
 
-    # ── SEP (vphone600 — matches device tree) ────────────────────────
+    # ── SEP (matches device tree) ────────────────────────────────────
     m["SEP"] = entry(C, VP, "SEP")
     m["RestoreSEP"] = entry(C, VP, "RestoreSEP")
 
-    # ── Kernel (vphone600, patched by the Swift firmware pipeline) ─────
+    # ── Kernel (patched by the Swift firmware pipeline) ───────────────
     m["KernelCache"] = entry(C, VPR, "KernelCache")  # research
     m["RestoreKernelCache"] = entry(C, VP, "RestoreKernelCache")  # release
 
-    # ── Recovery mode (vphone600ap carries this entry) ────────────────
-    m["RecoveryMode"] = entry(C, VP, "RecoveryMode")
+    # ── Recovery mode (runtime variant; absent on newer vresearch101-only builds)
+    if has_entry(C, VP, "RecoveryMode"):
+        m["RecoveryMode"] = entry(C, VP, "RecoveryMode")
 
     # ── CloudOS erase ramdisk ────────────────────────────────────────
     m["RestoreRamDisk"] = entry(C, PROD, "RestoreRamDisk")

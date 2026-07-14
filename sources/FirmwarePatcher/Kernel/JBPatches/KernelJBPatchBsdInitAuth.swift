@@ -121,15 +121,17 @@ extension KernelJBPatcher {
     /// Find the BL to _panic within 0x40 bytes after `addOff`.
     private func findPanicCallNear(_ addOff: Int) -> Int? {
         let limit = min(addOff + 0x40, buffer.count)
+        var firstBLOff: Int? = nil
         for scan in stride(from: addOff, to: limit, by: 4) {
-            if let target = jbDecodeBL(at: scan),
-               let panicOff = panicOffset,
-               target == panicOff
-            {
+            guard let target = jbDecodeBL(at: scan) else { continue }
+            if firstBLOff == nil { firstBLOff = scan }
+            if let panicOff = panicOffset, target == panicOff {
                 return scan
             }
         }
-        return nil
+        // iOS 26.5.x calls a local panic helper from this block instead of the
+        // global _panic symbol. The string anchor keeps this fallback precise.
+        return firstBLOff
     }
 
     /// Check if instruction at `off` is the rootauth CBNZ gate site.

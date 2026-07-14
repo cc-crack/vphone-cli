@@ -2,7 +2,7 @@
 //
 // Historical note: this file replaces the old Python firmware patcher implementation.
 //
-// Pipeline order: AVPBooter → iBSS → iBEC → LLB → TXM → Kernel → DeviceTree
+// Pipeline order: AVPBooter → iBSS → iBEC → LLB → iBoot → TXM → Kernel → DeviceTree
 //
 // Variant selection (mirrors Makefile targets):
 //   .regular — base patchers only
@@ -244,7 +244,20 @@ public final class FirmwarePipeline {
             }]
         ))
 
-        // 5. TXM — dev/jb/exp variants use TXMDevPatcher (adds entitlements, debugger, dev-mode)
+        // 5. iBoot - Normal VM boots use the research iBoot image.
+        components.append(ComponentDescriptor(
+            name: "iBoot",
+            inRestoreDir: true,
+            searchPatterns: [
+                "Firmware/all_flash/iBoot.vresearch101.RESEARCH_RELEASE.im4p",
+                "Firmware/all_flash/iBoot.vresearch101.RELEASE.im4p",
+            ],
+            patcherFactories: [{ data, verbose in
+                IBootPatcher(data: data, mode: .iboot, verbose: verbose)
+            }]
+        ))
+
+        // 6. TXM — dev/jb/exp variants use TXMDevPatcher (adds entitlements, debugger, dev-mode)
         components.append(ComponentDescriptor(
             name: "TXM",
             inRestoreDir: true,
@@ -265,12 +278,15 @@ public final class FirmwarePipeline {
             }()
         ))
 
-        // 6. Kernel — JB variant runs base kernel patches first, then JB extensions.
+        // 7. Kernel — JB variant runs base kernel patches first, then JB extensions.
         //    EXP variant runs base + JB + experimental extensions (hv_vmm rename).
         components.append(ComponentDescriptor(
             name: "kernelcache",
             inRestoreDir: true,
-            searchPatterns: ["kernelcache.research.vphone600"],
+            searchPatterns: [
+                "kernelcache.research.vphone600",
+                "kernelcache.research.vresearch101",
+            ],
             patcherFactories: {
                 return switch variant {
                 case .less:
@@ -308,14 +324,17 @@ public final class FirmwarePipeline {
             }()
         ))
 
-        // 7. DeviceTree — base property patches for every variant. EXP additionally
+        // 8. DeviceTree — base property patches for every variant. EXP additionally
         //    applies the 8 identity-rewrite properties (Tier 1b + 1c) that flip the
         //    device's userland-visible identity toward D47AP / iPhone17,3.
         let dtIncludeIdentity = variant == .exp
         components.append(ComponentDescriptor(
             name: "DeviceTree",
             inRestoreDir: true,
-            searchPatterns: ["Firmware/all_flash/DeviceTree.vphone600ap.im4p"],
+            searchPatterns: [
+                "Firmware/all_flash/DeviceTree.vphone600ap.im4p",
+                "Firmware/all_flash/DeviceTree.vresearch101ap.im4p",
+            ],
             patcherFactories: [{ data, verbose in
                 DeviceTreePatcher(
                     data: data,

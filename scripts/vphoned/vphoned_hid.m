@@ -14,6 +14,7 @@ static void (*pDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
 
 static IOHIDEventSystemClientRef gClient;
 static dispatch_queue_t gHIDQueue;
+static BOOL gHIDAvailable = NO;
 
 BOOL vp_hid_load(void) {
     void *h = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
@@ -36,11 +37,19 @@ BOOL vp_hid_load(void) {
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
     gHIDQueue = dispatch_queue_create("com.vphone.vphoned.hid", attr);
 
+    gHIDAvailable = YES;
     NSLog(@"vphoned: IOKit loaded");
     return YES;
 }
 
+BOOL vp_hid_available(void) {
+    return gHIDAvailable;
+}
+
 static void send_hid_event(IOHIDEventRef event) {
+    if (!gHIDAvailable || !gHIDQueue || !gClient)
+        return;
+
     IOHIDEventRef strong = (IOHIDEventRef)CFRetain(event);
     dispatch_async(gHIDQueue, ^{
         pSetSender(strong, 0x8000000817319372);
@@ -50,6 +59,9 @@ static void send_hid_event(IOHIDEventRef event) {
 }
 
 void vp_hid_press(uint32_t page, uint32_t usage) {
+    if (!gHIDAvailable)
+        return;
+
     IOHIDEventRef down = pKeyboard(kCFAllocatorDefault, mach_absolute_time(),
                                    page, usage, 1, 0);
     if (!down) return;
@@ -66,6 +78,9 @@ void vp_hid_press(uint32_t page, uint32_t usage) {
 }
 
 void vp_hid_key(uint32_t page, uint32_t usage, BOOL down) {
+    if (!gHIDAvailable)
+        return;
+
     IOHIDEventRef ev = pKeyboard(kCFAllocatorDefault, mach_absolute_time(),
                                  page, usage, down ? 1 : 0, 0);
     if (ev) { send_hid_event(ev); CFRelease(ev); }
