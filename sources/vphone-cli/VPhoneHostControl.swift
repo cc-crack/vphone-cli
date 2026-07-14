@@ -27,6 +27,8 @@ class VPhoneHostControl {
     private let socketPath: String
     private var listenFD: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "vphone.hostcontrol.accept")
+    private let clientQueue = DispatchQueue(label: "vphone.hostcontrol.client", attributes: .concurrent)
+    private let clientSlots = DispatchSemaphore(value: MaxActiveClients)
 
     private weak var captureView: VPhoneVirtualMachineView?
     private var screenRecorder: VPhoneScreenRecorder?
@@ -47,6 +49,7 @@ class VPhoneHostControl {
 
     /// Compact screenshot scale factor (1/3 = 430x932).
     private static let compactScale = 3
+    nonisolated private static let MaxActiveClients = 8
 
     init(socketPath: String) {
         self.socketPath = socketPath
@@ -111,8 +114,15 @@ class VPhoneHostControl {
         print("[hostctl] listening on \(socketPath)")
 
         let capturedFD = fd
+        let clientQueue = clientQueue
+        let clientSlots = clientSlots
         acceptQueue.async { [weak self] in
-            Self.acceptLoop(listenFD: capturedFD, controller: self)
+            Self.acceptLoop(
+                listenFD: capturedFD,
+                controller: self,
+                clientQueue: clientQueue,
+                clientSlots: clientSlots
+            )
         }
     }
 
@@ -176,18 +186,72 @@ class VPhoneHostControl {
 
     // MARK: - Accept Loop
 
-    private nonisolated static func acceptLoop(listenFD: Int32, controller: VPhoneHostControl?) {
+    private nonisolated static func acceptLoop(
+        listenFD: Int32,
+        controller: VPhoneHostControl?,
+        clientQueue: DispatchQueue,
+        clientSlots: DispatchSemaphore
+    ) {
         while true {
             let clientFD = accept(listenFD, nil, nil)
             guard clientFD >= 0 else { break }
-            handleClient(clientFD, controller: controller)
+            var noSigPipe: Int32 = 1
+            guard setsockopt(
+                clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                socklen_t(MemoryLayout.size(ofValue: noSigPipe))
+            ) == 0 else {
+                print("[hostctl] SO_NOSIGPIPE failed: \(String(cString: strerror(errno)))")
+                close(clientFD)
+                continue
+            }
+
+            let descriptorFlags = fcntl(clientFD, F_GETFL)
+            guard descriptorFlags >= 0,
+                  fcntl(clientFD, F_SETFL, descriptorFlags | O_NONBLOCK) == 0
+            else {
+                print("[hostctl] O_NONBLOCK failed: \(String(cString: strerror(errno)))")
+                close(clientFD)
+                continue
+            }
+
+            guard clientSlots.wait(timeout: .now()) == .success else {
+                writeResponse(clientFD, ok: false, error: "server busy")
+                close(clientFD)
+                continue
+            }
+            clientQueue.async {
+                defer { clientSlots.signal() }
+                handleClient(clientFD, controller: controller)
+            }
         }
     }
 
     private nonisolated static func handleClient(_ fd: Int32, controller: VPhoneHostControl?) {
         defer { close(fd) }
 
-        guard let line = readLine(from: fd) else { return }
+        let line: String
+        switch VPhoneHostRequestReader.readLine(from: fd) {
+        case .line(let requestLine):
+            line = requestLine
+        case .tooLarge:
+            writeResponse(fd, ok: false, error: "request exceeds 16 MiB")
+            return
+        case .invalidUTF8:
+            writeResponse(fd, ok: false, error: "request is not valid UTF-8")
+            return
+        case .disconnected:
+            return
+        case .timedOut:
+            writeResponse(fd, ok: false, error: "request timed out after 10 seconds")
+            return
+        case .readError(let code):
+            writeResponse(
+                fd,
+                ok: false,
+                error: "request read failed: \(String(cString: strerror(code)))"
+            )
+            return
+        }
 
         guard let data = line.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -200,7 +264,18 @@ class VPhoneHostControl {
         // Whether to include a compact screenshot in the response (default: true)
         let wantScreen = json["screen"] as? Bool ?? true
         // Delay before screenshot (ms) — lets animations settle
-        let screenDelay = json["delay"] as? Int ?? 500
+        let screenDelay: Int
+        if wantScreen {
+            guard let boundedDelay = VPhoneHostRequestTiming.screenDelayMilliseconds(
+                from: json["delay"]
+            ) else {
+                writeResponse(fd, ok: false, error: "delay must be an integer from 0 to 2000 ms")
+                return
+            }
+            screenDelay = boundedDelay
+        } else {
+            screenDelay = 0
+        }
 
         switch type {
         case "screenshot":
@@ -262,7 +337,11 @@ class VPhoneHostControl {
                 )
                 result.ok = true
                 if wantScreen {
-                    try? await Task.sleep(nanoseconds: UInt64(screenDelay) * 1_000_000)
+                    try? await Task.sleep(
+                        nanoseconds: VPhoneHostRequestTiming.nanoseconds(
+                            milliseconds: screenDelay
+                        )
+                    )
                     result.imageBase64 = await controller.captureCompactScreenshot()
                 }
             }
@@ -277,7 +356,12 @@ class VPhoneHostControl {
                 writeResponse(fd, ok: false, error: "swipe requires x1, y1, x2, y2")
                 return
             }
-            let durationMs = json["ms"] as? Int ?? 300
+            guard let durationMs = VPhoneHostRequestTiming.swipeDurationMilliseconds(
+                from: json["ms"]
+            ) else {
+                writeResponse(fd, ok: false, error: "ms must be an integer from 0 to 2000")
+                return
+            }
             let semaphore = DispatchSemaphore(value: 0)
             let result = ResultBox()
 
@@ -296,7 +380,11 @@ class VPhoneHostControl {
                 if wantScreen {
                     // Wait for swipe to finish + settle
                     let totalDelay = durationMs + screenDelay
-                    try? await Task.sleep(nanoseconds: UInt64(totalDelay) * 1_000_000)
+                    try? await Task.sleep(
+                        nanoseconds: VPhoneHostRequestTiming.nanoseconds(
+                            milliseconds: totalDelay
+                        )
+                    )
                     result.imageBase64 = await controller.captureCompactScreenshot()
                 }
             }
@@ -332,7 +420,11 @@ class VPhoneHostControl {
                 ctl.sendHIDPress(page: key.page, usage: key.usage)
                 result.ok = true
                 if wantScreen {
-                    try? await Task.sleep(nanoseconds: UInt64(screenDelay) * 1_000_000)
+                    try? await Task.sleep(
+                        nanoseconds: VPhoneHostRequestTiming.nanoseconds(
+                            milliseconds: screenDelay
+                        )
+                    )
                     result.imageBase64 = await controller.captureCompactScreenshot()
                 }
             }
@@ -358,7 +450,11 @@ class VPhoneHostControl {
                     try await ctl.clipboardSet(text: text)
                     result.ok = true
                     if wantScreen {
-                        try? await Task.sleep(nanoseconds: UInt64(screenDelay) * 1_000_000)
+                        try? await Task.sleep(
+                            nanoseconds: VPhoneHostRequestTiming.nanoseconds(
+                                milliseconds: screenDelay
+                            )
+                        )
                         result.imageBase64 = await controller.captureCompactScreenshot()
                     }
                 } catch {
@@ -684,23 +780,6 @@ class VPhoneHostControl {
 
     // MARK: - Socket I/O
 
-    private nonisolated static func readLine(from fd: Int32) -> String? {
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        var accumulated = Data()
-
-        while accumulated.count < 4096 {
-            let n = read(fd, &buffer, buffer.count)
-            guard n > 0 else { break }
-            accumulated.append(contentsOf: buffer[..<n])
-            if accumulated.contains(0x0A) { break }
-        }
-
-        if let nlRange = accumulated.firstIndex(of: 0x0A) {
-            return String(data: accumulated[..<nlRange], encoding: .utf8)
-        }
-        return accumulated.isEmpty ? nil : String(data: accumulated, encoding: .utf8)
-    }
-
     private nonisolated static func writeResponse(
         _ fd: Int32, ok: Bool, path: String? = nil, error: String? = nil, image: String? = nil,
         extra: [String: Any]? = nil
@@ -715,20 +794,16 @@ class VPhoneHostControl {
             }
         }
 
-        guard let data = try? JSONSerialization.data(withJSONObject: dict),
-              var json = String(data: data, encoding: .utf8)
-        else { return }
+        guard var data = try? JSONSerialization.data(withJSONObject: dict) else { return }
+        data.append(0x0A)
 
-        json += "\n"
-        json.withCString { ptr in
-            var remaining = strlen(ptr)
-            var offset = 0
-            while remaining > 0 {
-                let written = write(fd, ptr.advanced(by: offset), remaining)
-                if written <= 0 { break }
-                offset += written
-                remaining -= written
-            }
+        switch VPhoneHostResponseWriter.writeAll(data, to: fd) {
+        case .success:
+            break
+        case .timedOut:
+            print("[hostctl] response write timed out")
+        case .writeError(let code):
+            print("[hostctl] response write failed: \(String(cString: strerror(code)))")
         }
     }
 }

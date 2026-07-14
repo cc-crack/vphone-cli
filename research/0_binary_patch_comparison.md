@@ -65,7 +65,7 @@
 | --- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ | :-----: | :-: | :-: |
 | 1   | Serial labels (2x)                  | "Loaded iBEC" in serial log                                                                                        |    Y    |  Y  |  Y  |
 | 2   | `image4_validate_property_callback` | Signature bypass                                                                                                   |    Y    |  Y  |  Y  |
-| 3   | Boot-args redirect                  | ADRP+ADD -> `serial=3 -v debug=0x2014e %s`                                                                         |    Y    |  Y  |  Y  |
+| 3   | Boot-args redirect                  | ADRP+ADD -> `serial=3 -v debug=0x2014e %s`; iOS 18 base adds `if_attach_nx=0x3` (skywalk BSD_ONLY: disables fsw netagents so Network.framework uses BSD sockets, fixes mDNSResponder skywalk-channel crash-loop / DNS) |    Y    |  Y  |  Y  |
 | 4   | Modern bootx-handoff panic bypass   | `IBootPatcher.patchBootxPrecondition` NOPs gate TBZ via structural anchor (no hash/line tied); no-op pre-26.4      |    Y    |  Y  |  Y  |
 | 5   | Ramdisk boot-args overwrite         | `ramdisk_build.py:patch_ibec_bootargs` rewrites string to `... rd=md0 ... wdt=-1 ...` (ramdisk-send iBEC only)     |    Y    |  Y  |  Y  |
 
@@ -75,7 +75,7 @@
 | --- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ | :-----: | :-: | :-: |
 | 1   | Serial labels (2x)                  | "Loaded LLB" in serial log                                                                                         |    Y    |  Y  |  Y  |
 | 2   | `image4_validate_property_callback` | Signature bypass                                                                                                   |    Y    |  Y  |  Y  |
-| 3   | Boot-args redirect                  | ADRP+ADD -> `serial=3 -v debug=0x2014e %s`                                                                         |    Y    |  Y  |  Y  |
+| 3   | Boot-args redirect                  | ADRP+ADD -> `serial=3 -v debug=0x2014e %s`; iOS 18 base adds `if_attach_nx=0x3` (skywalk BSD_ONLY: disables fsw netagents so Network.framework uses BSD sockets, fixes mDNSResponder skywalk-channel crash-loop / DNS) |    Y    |  Y  |  Y  |
 | 4   | Rootfs bypass (5 patches)           | Allow edited rootfs loading                                                                                        |    Y    |  Y  |  Y  |
 | 5   | Panic bypass                        | NOP `cbnz` after `mov w8,#0x328` check                                                                             |    Y    |  Y  |  Y  |
 
@@ -116,7 +116,9 @@
 | 15    | `mov w0,#0`                | `_handle_fsioc_graft`            | Allow fsioc graft                                  |    Y    |  Y  |  Y  |
 | 16    | NOP (3x)                   | `handle_get_dev_by_role`         | Bypass APFS role-lookup deny gates for boot mounts |    Y    |  Y  |  Y  |
 | 17-26 | `mov x0,#0; ret` (5 hooks) | Sandbox MACF ops table           | Stub 5 sandbox hooks                               |    Y    |  Y  |  Y  |
-| 27    | `PACIBSP→RET`              | `_thread_guard_violation`        | Disable EXC_GUARD delivery (match production behavior) |    -    |  Y  |  -  |
+| 27    | `PACIBSP→RET`              | `_thread_guard_violation`        | Disable fatal EXC_GUARD (Mach port guard) delivery. Dev variant always; regular/jb/exp gain it automatically on **iOS 18 bases** (18.6.2's runningboardd/SpringBoard trip `GUARD_TYPE_MACH_PORT` "flavor 10", a guard the 26.1 kernel enforces fatally, crash-looping the UI). 26.x bases boot without it and are unaffected. | 18† | Y | 18† |
+
+† iOS 18 bases only — auto-detected in `FirmwarePipeline` from `iPhone-BuildManifest.plist`'s `ProductVersion` (the pre-hybrid manifest fw_prepare preserves; the live BuildManifest reads the cloudOS 26.1 version). Passed to `KernelPatcher` as `applyExcGuard`, which gates patch 27.
 
 ### JB-Only Kernel Methods (Reference List)
 
@@ -172,6 +174,7 @@ do NOT execute these).
 | 6   | Weak dylib load injection | `launchd`              | Load short alias `/b` (copy of `launchdhook.dylib`) at launch. On by default; set `DISABLE_LAUNCHD_HOOK=1` to skip because this pid-1 hook path is boot-critical and has produced boot-analysis failures |    -    |  Y  |  Y  |
 | 7   | cstring byte 5 mangle `'h' → 'X'` (`"kern.hv_vmm_present"` → `"kern.Xv_vmm_present"`) + per-page slot-hash re-attestation, BLACKLIST semantics — **EXP only** | DSC dylibs        | Companion to EXP kernel rename (`KernelEXPPatcher.patchHvVmmRename`). The mangle is applied to every DSC dylib EXCEPT those in `DONT_PATCH_INSTALL_NAMES` (sign-in / device-likeness consumers, ~15 entries). Patched dylibs query `kern.Xv_vmm_present` and get the truthful 1 (graphics / accel passthrough). Blacklisted dylibs keep the original cstring, hit ENOENT on the renamed kernel, cache 0, lie about VM presence. On `codeSigningMonitor == 2` hardware the byte-mangle alone causes `CODESIGNING/Invalid Page` SIGKILL because TXM enforces per-page hashes; the re-attestation pass recomputes the SHA-256 slot in the chunk's `CS_CodeDirectory` for every modified 16 KiB page. See `scripts/patchers/cfw_dsc_codesign.py` and `cfw_patch_hv_vmm_dsc.py`. |    -    |  -  |  -  |
 | 8   | (removed — was: standalone-binary mangle in 6 rootfs Mach-Os via SSH) | n/a               | Removed in the blacklist-flip redesign. With the EXP kernel rename in place, the 6 rootfs binaries (MobileActivationMigrator, CheckerBoard, StoreKitUISceneService, storekitd, appstored, CorePrescriptionService) get the desired "cache 0 / not in a VM" behavior for free: they keep their original cstring, hit ENOENT on the renamed kernel sysctl, defensive `cbnz w0, skip` leaves the cached byte at BSS-zero. No SSH-time standalone patch needed. |    -    |  -  |  -  |
+| 9   | `mov w3,#<size>` -> `mov w3,#0x560` in `_kern_SwapEnd` — **26.0/26.0.1 and 18.x** | DSC `IOMobileFramebuffer` | Fixes host VZ GUI black-screen with the available PCC vphone600 userclient: userland sends a smaller external-method-5 SwapEnd state than the 26.1-era 0x560 the userclient expects, so SwapEnd returns `kIOReturnBadArgument` and the host display stays black (guest still renders — the Apple logo is visible over VNC, just not in the vphone-cli view). Source sizes observed: 26.0/26.0.1 = 0x548, 18.6.2 = 0x514. The patcher is semantic (anchors on `mov w1,#5` -> `mov w3,#imm` -> `mov x4,#0`/`mov x5,#0` -> `bl` inside `_kern_SwapEnd`) and idempotent — rewrites the size to 0x560 regardless of source and re-attests the modified DSC page. Install gate fires when `ProductVersion` starts with `26.0` or `18.`. Validated after host install on `17,3_26.0_23A341`, `17,3_26.0.1_23A355`, and `17,3_18.6.2_22G100` (Apple logo now renders in the vphone-cli view); 26.1 remains unmodified. |    Y    |  Y  |  Y  |
 
 ### Installed Components
 
@@ -652,6 +655,7 @@ cache rebuild.
 | Procursus bootstrap deployment                | -                               | -                          | Y (JB-2)                                      | Y (JB-2)                                              |
 | BaseBin hook deployment (`*.dylib` -> `/mnt1/cores`) | -                        | -                          | Y (JB-3)                                      | Y (JB-3)                                              |
 | First-boot JB finalization (`vphone_jb_setup.sh`) | -                           | -                          | Y (post-boot)                                 | Y (post-boot)                                         |
+| IOMobileFramebuffer SwapEnd payload-size patch (`26.0 and 26.0.1` only) | Y              | Y                          | Y (inherited from base run)                   | Y (inherited from base run)                           |
 | DSC pre-patch (`kern.hv_vmm_present` byte-5 mangle + slot reattest) | -         | -                          | -                                             | Y (pre-step, before base CFW)                         |
 | DSC camera patches (12 patches across CMCapture / CoreMediaIO / AVFCapture / libMobileGestalt) | - | -                  | -                                             | Y (pre-step, same cryptex mount as hv_vmm)            |
 | `watchdogd` surgical 2-insn patch + slot reattest | -                           | -                          | -                                             | Y (EXP-JB-3.5)                                        |
@@ -736,6 +740,7 @@ cache rebuild.
   - unaligned integer reads across the firmware patcher now go through a shared safe `Data.loadLE(...)` helper, fixing the JB IM4P crash (`Swift/UnsafeRawPointer.swift:449` misaligned raw pointer load).
   - `TXMPatcher` now preserves pristine Python parity by preferring the legacy trustcache binary-search site when present, and only falls back to the selector24 hash-flags call chain (`ldr x1, [x20,#0x38]` -> `add x2, sp, #4` -> `bl` -> `ldp x0, x1, [x20,#0x30]` -> `add x2, sp, #8` -> `bl`) when rerunning on a VM tree that already carries the dev/JB selector24 early-return patch.
   - `scripts/fw_prepare.sh` now deletes stale sibling `*Restore*` directories in the working VM directory before patching continues, so a fresh `make fw_prepare && make fw_patch` cannot accidentally select an older prepared firmware tree (for example `26.1`) when a newer one (for example `26.3`) was just generated.
+  - 26.0 and 26.0.1 GUI bring-up now patches installed DSC `IOMobileFramebuffer` only when `ProductVersion` starts with `26.0`: `_kern_SwapEnd` passes a 0x560-byte state to the 26.1 PCC userclient instead of the 26.0/26.0.1 0x548-byte state. JB host installs were validated on `17,3_26.0_23A341`, `17,3_26.0.1_23A355`, and unchanged `17,3_26.1_23B85`.
 - IM4P/output parity fixes completed after synthetic full-pipeline comparison:
   - `IM4PHandler.save()` no longer forces a generic LZFSE re-encode.
   - Swift now rebuilds IM4Ps in the same effective shape as the Python patch flow and only preserves trailing `PAYP` metadata for `TXM` (`trxm`) and `kernelcache` (`krnl`).

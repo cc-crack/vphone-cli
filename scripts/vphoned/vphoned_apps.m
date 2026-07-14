@@ -31,6 +31,11 @@
 
 // FBSSystemService loaded via dlsym
 static Class gFBSSystemServiceClass = Nil;
+typedef CFStringRef (*SBSCopyFrontmostApplicationDisplayIdentifierFn)(void);
+static SBSCopyFrontmostApplicationDisplayIdentifierFn
+    pSBSCopyFrontmostApplicationDisplayIdentifier = NULL;
+static id gApplicationStateMonitor = nil;
+static NSString *gApplicationStateFrontmostKey = nil;
 
 static BOOL gAppsLoaded = NO;
 
@@ -46,6 +51,35 @@ BOOL vp_apps_load(void) {
     }
   } else {
     NSLog(@"vphoned: dlopen FrontBoardServices failed: %s", dlerror());
+  }
+
+  void *sbs = dlopen("/System/Library/PrivateFrameworks/"
+                     "SpringBoardServices.framework/SpringBoardServices",
+                     RTLD_LAZY);
+  if (sbs) {
+    pSBSCopyFrontmostApplicationDisplayIdentifier =
+        (SBSCopyFrontmostApplicationDisplayIdentifierFn)dlsym(
+            sbs, "SBSCopyFrontmostApplicationDisplayIdentifier");
+  }
+  if (!pSBSCopyFrontmostApplicationDisplayIdentifier) {
+    NSLog(@"vphoned: frontmost application API unavailable");
+  }
+
+  void *assertionServices = dlopen(
+      "/System/Library/PrivateFrameworks/AssertionServices.framework/"
+      "AssertionServices",
+      RTLD_LAZY);
+  if (assertionServices) {
+    Class monitorClass = NSClassFromString(@"BKSApplicationStateMonitor");
+    NSString *const *frontmostKeyPointer = (NSString *const *)dlsym(
+        assertionServices, "BKSApplicationStateAppIsFrontmostKey");
+    if (monitorClass && frontmostKeyPointer && *frontmostKeyPointer) {
+      gApplicationStateMonitor = [[monitorClass alloc] init];
+      gApplicationStateFrontmostKey = *frontmostKeyPointer;
+    }
+  }
+  if (!gApplicationStateMonitor || !gApplicationStateFrontmostKey) {
+    NSLog(@"vphoned: BKS frontmost application fallback unavailable");
   }
 
   // LSApplicationWorkspace is in CoreServices (already linked)
@@ -78,6 +112,18 @@ static NSString *state_for_pid(pid_t pid) {
   if (pid > 0)
     return @"running";
   return @"not_running";
+}
+
+static BOOL app_is_frontmost(pid_t pid) {
+  if (pid <= 0 || !gApplicationStateMonitor ||
+      !gApplicationStateFrontmostKey)
+    return NO;
+  SEL infoSelector = sel_registerName("applicationInfoForPID:");
+  if (![gApplicationStateMonitor respondsToSelector:infoSelector])
+    return NO;
+  NSDictionary *info = ((id (*)(id, SEL, pid_t))objc_msgSend)(
+      gApplicationStateMonitor, infoSelector, pid);
+  return [info[gApplicationStateFrontmostKey] boolValue];
 }
 
 // MARK: - Command Handler
@@ -127,6 +173,52 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
 
     NSMutableDictionary *r = vp_make_response(@"app_list", reqId);
     r[@"apps"] = result;
+    return r;
+  }
+
+  // -- app_foreground --
+  if ([type isEqualToString:@"app_foreground"]) {
+    NSString *bundleID = nil;
+    if (pSBSCopyFrontmostApplicationDisplayIdentifier) {
+      CFStringRef copiedIdentifier =
+          pSBSCopyFrontmostApplicationDisplayIdentifier();
+      if (copiedIdentifier)
+        bundleID = CFBridgingRelease(copiedIdentifier);
+    }
+
+    NSString *name = @"";
+    pid_t pid = 0;
+    LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+    for (LSApplicationProxy *proxy in [ws allInstalledApplications]) {
+      if ([proxy.bundleIdentifier isEqualToString:bundleID]) {
+        name = proxy.localizedName ?: @"";
+        pid = pid_for_app(bundleID);
+        break;
+      }
+    }
+
+    if (bundleID.length == 0) {
+      for (LSApplicationProxy *proxy in [ws allInstalledApplications]) {
+        pid_t candidatePID = pid_for_app(proxy.bundleIdentifier);
+        if (app_is_frontmost(candidatePID)) {
+          bundleID = proxy.bundleIdentifier;
+          name = proxy.localizedName ?: @"";
+          pid = candidatePID;
+          break;
+        }
+      }
+    }
+
+    if (bundleID.length == 0) {
+      NSMutableDictionary *r = vp_make_response(@"err", reqId);
+      r[@"msg"] = @"no foreground application";
+      return r;
+    }
+
+    NSMutableDictionary *r = vp_make_response(@"app_foreground", reqId);
+    r[@"bundle_id"] = bundleID;
+    r[@"name"] = name;
+    r[@"pid"] = @(pid > 0 ? pid : 0);
     return r;
   }
 
